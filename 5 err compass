@@ -1,0 +1,234 @@
+//+------------------------------------------------------------------+
+//|                  AAI_Indicator_BiasCompass.mq5                   |
+//|             v2.1 - Non-blocking Calculation Update               |
+//|        (Determines multi-timeframe directional bias)             |
+//|                                                                  |
+//| Copyright 2025, AlfredAI Project                    |
+//+------------------------------------------------------------------+
+#property indicator_chart_window
+#property strict
+#property version "2.1"
+
+// === BEGIN Spec: Headless + buffers ===
+#property indicator_plots   0
+#property indicator_buffers 2
+
+#property indicator_plots   0
+#property indicator_buffers 4
+
+// --- BiasCompass buffers (standardized names) ---
+double BC_HTF_Bias[];
+double BC_LTF_Bias[];
+double BC_HTF_Conf[];
+double BC_LTF_Conf[];
+
+
+// --- Buffer declarations
+#property indicator_label1  "Bias"
+double BiasBuffer[];
+#property indicator_label2  "Confidence"
+double ConfidenceBuffer[];
+// === END Spec ===
+
+// --- Enums for State Management
+enum ENUM_BIAS
+{
+    BIAS_BULL,
+    BIAS_BEAR,
+    BIAS_NEUTRAL
+};
+
+// --- Reference timeframes for analysis ---
+ENUM_TIMEFRAMES TFList[] = { PERIOD_M15, PERIOD_H1, PERIOD_H4 };
+
+// === SAFE TEST HARNESS (BiasCompass) ===
+input bool BC_SafeTest = false;     // when true, bypass heavy logic and publish deterministic bias values
+static const int BC_WARMUP = 50;
+
+// Adjust buffer names/indexes below to match your file if they differ.
+// Expected (typical) order: 0=HTF_Bias, 1=LTF_Bias, 2=HTF_Conf, 3=LTF_Conf
+
+void BC_SafeFill(const int rates_total, const int prev_calculated,
+                 double &BufHTF_Bias[], double &BufLTF_Bias[], double &BufHTF_Conf[], double &BufLTF_Conf[])
+{
+   int start = (prev_calculated>0 ? prev_calculated-1 : MathMin(BC_WARMUP, rates_total-1));
+   if(start < 0) start = 0;
+
+   for(int i=start; i<rates_total; ++i)
+   {
+      // Simple non-blocking pattern: alternate LTF bias every 8 bars, HTF every 32 bars
+      int k8  = (i % 8);
+      int k32 = (i % 32);
+      double ltfBias = (k8  < 4 ?  1.0 : -1.0);  // flip faster
+      double htfBias = (k32 < 16 ? 1.0 : -1.0);  // flip slower
+
+      BufHTF_Bias[i] = htfBias;
+      BufLTF_Bias[i] = ltfBias;
+      BufHTF_Conf[i] = 10.0;                     // mid confidence
+      BufLTF_Conf[i] = 10.0;
+   }
+}
+
+
+// --- Forward Declarations ---
+int GetRawCompassBias(int shift, bool &conflict, string &biasText);
+string GetMagnetDirection(int shift);
+ENUM_BIAS TextToBias(string biasText);
+
+//+------------------------------------------------------------------+
+//| Initialization                                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // === BEGIN Spec: Bind ALL published arrays as data + series ===
+    bool ok = true;
+    ok &= SetIndexBuffer(0, BiasBuffer,       INDICATOR_DATA);
+    ok &= SetIndexBuffer(1, ConfidenceBuffer, INDICATOR_DATA);
+
+    if(!ok)
+    {
+        Print("BiasCompass SetIndexBuffer failed");
+        return(INIT_FAILED);
+    }
+
+    ArraySetAsSeries(BiasBuffer,       true);
+    ArraySetAsSeries(ConfidenceBuffer, true);
+    // === END Spec ===
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Deinitialization                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // No objects to clean up in headless mode
+}
+
+//+------------------------------------------------------------------+
+//| Main calculation loop                                            |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+if(BC_SafeTest)
+{
+   BC_SafeFill(rates_total, prev_calculated, BufHTF_Bias, BufLTF_Bias, BufHTF_Conf, BufLTF_Conf);
+   return(rates_total); // skip heavy logic
+}
+
+    // === BEGIN Spec: Canonical incremental pattern ===
+    const int WARMUP = 50; // Warmup for MAs and other indicators
+
+    if(rates_total <= WARMUP)
+    {
+        for(int i = 0; i < rates_total; i++) { BiasBuffer[i] = 0; ConfidenceBuffer[i] = 0; }
+        return(rates_total);
+    }
+
+    int start = (prev_calculated > 0 ? prev_calculated - 1 : WARMUP);
+    if(start < 0) start = 0;
+    if(start >= rates_total) start = rates_total - 1;
+
+    for(int i = start; i < rates_total; ++i)
+    {
+        int shift = rates_total - 1 - i;
+
+        string rawBiasText;
+        bool rawConflict = false;
+        int rawConfidence = GetRawCompassBias(shift, rawConflict, rawBiasText);
+        ENUM_BIAS rawBiasEnum = TextToBias(rawBiasText);
+
+        double biasValue = 0.0;
+        if(rawBiasEnum == BIAS_BULL) biasValue = 1.0;
+        else if(rawBiasEnum == BIAS_BEAR) biasValue = -1.0;
+
+        BiasBuffer[i] = biasValue;
+        ConfidenceBuffer[i] = (double)rawConfidence;
+    }
+    return(rates_total);
+    // === END Spec ===
+}
+
+//+------------------------------------------------------------------+
+//| Calculate RAW Multi-TF bias for a specific historical bar        |
+//+------------------------------------------------------------------+
+int GetRawCompassBias(int shift, bool &conflict, string &biasText)
+{
+   string magnetDir = GetMagnetDirection(shift);
+   int buy = 0, sell = 0;
+   for(int i = 0; i < ArraySize(TFList); i++)
+   {
+      ENUM_TIMEFRAMES tf = TFList[i];
+      
+      double ma_now  = iMA(_Symbol, tf, 8, shift, MODE_SMA, PRICE_CLOSE);
+      double ma_prev = iMA(_Symbol, tf, 8, shift + 3, MODE_SMA, PRICE_CLOSE);
+      double slope = ma_now - ma_prev;
+
+      int upC = 0, downC = 0;
+      for(int j = 1; j <= 5; j++)
+      {
+         double cNow  = iClose(_Symbol, tf, shift + j);
+         double cPrev = iClose(_Symbol, tf, shift + j + 1);
+         if(cNow > cPrev) upC++;
+         if(cNow < cPrev) downC++;
+      }
+
+      if(slope > 0.0003 || upC >= 4) buy++;
+      if(slope < -0.0003|| downC >= 4) sell++;
+   }
+
+   int confidence = 50;
+   biasText     = "NEUTRAL";
+   conflict     = false;
+   if(buy > sell)
+   {
+      biasText   = "BULL";
+      confidence = MathMin(70 + buy * 5, 100);
+      conflict   = (magnetDir == "🔴 Supply");
+   }
+   else if(sell > buy)
+   {
+      biasText   = "BEAR";
+      confidence = MathMin(70 + sell * 5, 100);
+      conflict   = (magnetDir == "🟢 Demand");
+   }
+
+   return(confidence);
+}
+
+//+------------------------------------------------------------------+
+//| Grab Magnet direction from ZoneEngine's data buffer              |
+//+------------------------------------------------------------------+
+string GetMagnetDirection(int shift)
+{
+   // This version reads data directly from the ZoneEngine indicator,
+   // making it compatible with headless operation in the EA.
+   double zone_status_arr[1];
+   if(CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine"), 0, shift, 1, zone_status_arr) > 0)
+   {
+      double status = zone_status_arr[0];
+      if(status > 0.5) return "🟢 Demand";
+      if(status < -0.5) return "🔴 Supply";
+   }
+   return "NEUTRAL";
+}
+
+//+------------------------------------------------------------------+
+//| --- Helper Functions ---                                         |
+//+------------------------------------------------------------------+
+ENUM_BIAS TextToBias(string biasText)
+{
+    if(biasText == "BULL") return BIAS_BULL;
+    if(biasText == "BEAR") return BIAS_BEAR;
+    return BIAS_NEUTRAL;
+}
