@@ -1,0 +1,795 @@
+//+------------------------------------------------------------------+
+//|                     AAI_EA_TradeManager.mq5                      |
+//|               v3.4 - Final Clean Compile                         |
+//|         (Takes trade signals from AAI_Indicator_SignalBrain)     |
+//|                                                                  |
+//|
+//| Copyright 2025, AlfredAI Project                    |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "3.4"
+#property description "Manages trades and logs closed positions to a CSV journal."
+#include <Trade\Trade.mqh>
+
+#define EVT_INIT  "[INIT]"
+#define EVT_BAR   "[BAR]"
+#define EVT_ENTRY "[ENTRY]"
+#define EVT_EXIT  "[EXIT]"
+#define EVT_TS    "[TS]"
+#define EVT_PARTIAL "[PARTIAL]"
+#define EVT_JOURNAL "[JOURNAL]"
+#define EVT_ENTRY_CHECK "[EVT_ENTRY_CHECK]"
+#define EVT_ORDER_BLOCKED "[EVT_ORDER_BLOCKED]"
+#define EVT_WAIT "[EVT_WAIT]"
+// === BEGIN Spec: Add new event log types ===
+#define EVT_HEARTBEAT "[EVT_HEARTBEAT]"
+#define EVT_TICK "[EVT_TICK]"
+#define EVT_FIRST_BAR_OR_NEW "[EVT_FIRST_BAR_OR_NEW]"
+// === END Spec ===
+
+
+//--- Helper Enums (copied from SignalBrain for decoding)
+enum ENUM_REASON_CODE
+{
+    REASON_NONE,
+    REASON_BUY_HTF_CONTINUATION,
+    REASON_SELL_HTF_CONTINUATION,
+    REASON_BUY_LIQ_GRAB_ALIGNED,
+    REASON_SELL_LIQ_GRAB_ALIGNED,
+    REASON_NO_ZONE,
+    REASON_LOW_ZONE_STRENGTH,
+    REASON_BIAS_CONFLICT
+};
+//--- EA Inputs
+enum ENUM_EXECUTION_MODE
+{
+    SignalsOnly, // Log signals, do not execute trades
+    AutoExecute  // Automatically execute trades
+};
+input ENUM_EXECUTION_MODE ExecutionMode = SignalsOnly; // Execution mode for the EA
+input int      MinConfidenceToTrade = 13;
+// Min confidence score (0-20) to open a new trade
+input ulong    MagicNumber          = 1337;
+// Magic for this EA
+input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT; // Timeframe for SignalBrain & ZoneEngine to analyze
+
+//--- Dynamic Risk & Position Sizing Inputs ---
+input double   RiskPercent          = 1.0;
+// Percent of account balance to risk per trade
+input double   MinLotSize           = 0.01;
+// Minimum allowable lot size
+input double   MaxLotSize           = 10.0;
+// Maximum allowable lot size
+input int      StopLossBufferPips   = 5;
+// Pips to add as a buffer to the zone's distal line for SL
+input double   RiskRewardRatio      = 1.5;
+// Final Risk:Reward ratio for calculating Take Profit
+
+//--- Trade Management Inputs ---
+input bool     EnablePartialProfits = true;
+// Enable taking partial profits at 1R
+input double   PartialProfitRR      = 1.0;
+// RR level to take partial profit (e.g., 1.0 = 1R)
+input double   PartialClosePercent  = 50.0;
+// Percentage of position to close for partial profit
+input int      BreakEvenPips      = 40;
+// Pips to BE
+input int      TrailingStartPips  = 40;
+// Pips to start session trail
+input int      TrailingStopPips   = 30;
+// Session trail distance
+input int      OvernightTrailPips = 30;
+// Overnight trail distance
+input int      FridayCloseHour    = 22;
+// Fri close hour (local)
+input int      StartHour          = 1;
+// Session start hour (local)
+input int      StartMinute        = 0;
+// Session start minute
+input int      EndHour            = 23;
+// Session end hour (local)
+input int      EndMinute          = 30;
+// Session end minute
+input bool     EnableLogging      = true;
+// Verbose logging
+
+//--- Journaling Inputs ---
+input bool     EnableJournaling   = true;
+// Enable writing closed trades to a CSV file
+input string   JournalFileName    = "AlfredAI_Journal.csv";
+// File name for the trade journal
+
+//--- Globals
+CTrade    trade;
+string    symbolName;
+double    point;
+static ulong g_logged_positions[];
+int       g_logged_positions_total = 0;
+
+// === Persistent Indicator Handles ===
+int g_hSignalBrain = INVALID_HANDLE;
+int g_hZoneEngine  = INVALID_HANDLE;
+int g_hBiasCompass = INVALID_HANDLE;
+ENUM_TIMEFRAMES g_sbTF = PERIOD_CURRENT;
+
+// === BEGIN Spec: Heartbeat and new-bar detection globals ===
+static datetime g_lastBarTime = 0;
+static ulong    g_tickCount   = 0;
+// === END Spec ===
+
+// --- DEBUG FLAG ---
+const bool EnableEADebugLogging = true; // DEBUG: This is now hard-coded to ON for testing.
+const ENUM_TIMEFRAMES HTF_DEBUG = PERIOD_H4;
+const ENUM_TIMEFRAMES LTF_DEBUG = PERIOD_M15;
+
+// Points per pip for current symbol (handles 3/5-digit FX, JPY pairs, metals/CFDs)
+double PipPoint()
+{
+    double point_local = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double pip = (digits % 2 != 0) ? (10 * point_local) : point_local;
+    return pip;
+}
+
+double PriceFromPips(double pips) { return pips * PipPoint(); }
+
+double PipsFromPrice(double price_diff)
+{
+   double pip_point = PipPoint();
+   if(pip_point <= 0.0) return 0.0;
+   return price_diff / pip_point;
+}
+
+bool ReadBuf(const int handle, const int buffer_index, const int shift, double &out)
+{
+    double tmp[1];
+    if(handle == INVALID_HANDLE) return false;
+    if(CopyBuffer(handle, buffer_index, shift, 1, tmp) != 1) return false;
+    out = tmp[0];
+    return(MathIsValidNumber(out) && out != EMPTY_VALUE);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Lot Size based on Risk %, Confidence, and SL Price     |
+//+------------------------------------------------------------------+
+double CalculateLotSize(int confidence, double sl_distance_price)
+{
+   if(sl_distance_price <= 0) return 0.0;
+   double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double risk_amount = account_balance * (RiskPercent / 100.0);
+   double tick_size = SymbolInfoDouble(symbolName, SYMBOL_TRADE_TICK_SIZE);
+   double tick_value_loss = SymbolInfoDouble(symbolName, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tick_size <= 0) return 0.0;
+   double loss_per_lot = (sl_distance_price / tick_size) * tick_value_loss;
+   if(loss_per_lot <= 0) return 0.0;
+   double base_lot_size = risk_amount / loss_per_lot;
+   double scale_min = 0.5;
+   double scale_max = 1.0;
+   double conf_range = 20.0 - MinConfidenceToTrade;
+   double conf_step = confidence - MinConfidenceToTrade;
+   double scaling_factor = scale_min;
+   if(conf_range > 0)
+     {
+      scaling_factor = scale_min + ((scale_max - scale_min) * (conf_step / conf_range));
+     }
+   scaling_factor = fmax(scale_min, fmin(scale_max, scaling_factor));
+   double final_lot_size = base_lot_size * scaling_factor;
+   double lot_step = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
+   final_lot_size = round(final_lot_size / lot_step) * lot_step;
+   final_lot_size = fmax(MinLotSize, fmin(MaxLotSize, final_lot_size));
+   if(EnableLogging)
+      PrintFormat("   LotCalc: RiskAmt=%.2f, LossPerLot=%.2f, BaseLots=%.2f, Conf=%d, Scale=%.2f, FinalLots=%.2f",
+                  risk_amount, loss_per_lot, base_lot_size, confidence, scaling_factor, final_lot_size);
+   return final_lot_size;
+}
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                           |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   symbolName = _Symbol;
+   point = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   trade.SetExpertMagicNumber(MagicNumber);
+
+   if(EnableJournaling)
+      WriteJournalHeader();
+
+   if(EnableLogging)
+   {
+      PrintFormat("%s AAI_EA_TradeManager v3.4 initialized for %s", EVT_INIT, symbolName);
+      PrintFormat("%s ExecutionMode=%s", EVT_INIT, EnumToString(ExecutionMode));
+      PrintFormat("%s Journaling: %s to file '%s'", EVT_INIT, EnableJournaling ? "Enabled" : "Disabled", JournalFileName);
+   }
+
+   ArrayResize(g_logged_positions, 0);
+
+   g_sbTF = SignalTimeframe;
+   g_hSignalBrain = iCustom(_Symbol, g_sbTF, "AAI_Indicator_SignalBrain");
+   g_hZoneEngine  = iCustom(_Symbol, g_sbTF, "AAI_Indicator_ZoneEngine");
+   g_hBiasCompass = iCustom(_Symbol, g_sbTF, "AAI_Indicator_BiasCompass");
+
+   if(g_hSignalBrain == INVALID_HANDLE || g_hZoneEngine == INVALID_HANDLE || g_hBiasCompass == INVALID_HANDLE)
+   {
+      PrintFormat("%s Failed to create one or more indicator handles. SB=%d, ZE=%d, BC=%d", EVT_INIT, g_hSignalBrain, g_hZoneEngine, g_hBiasCompass);
+      return(INIT_FAILED);
+   }
+
+   if(EnableLogging)
+   {
+      PrintFormat("%s SB_handle=%d ZE_handle=%d BC_handle=%d TF=%s", EVT_INIT, g_hSignalBrain, g_hZoneEngine, g_hBiasCompass, EnumToString(g_sbTF));
+   }
+
+   // === BEGIN Spec: Heartbeat Timer ===
+   EventSetTimer(1);
+   // === END Spec ===
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // === BEGIN Spec: Heartbeat Timer ===
+   EventKillTimer();
+   // === END Spec ===
+   PrintFormat("%s Deinitialized. Reason=%d", EVT_INIT, reason);
+   if(g_hSignalBrain != INVALID_HANDLE) IndicatorRelease(g_hSignalBrain);
+   if(g_hZoneEngine != INVALID_HANDLE) IndicatorRelease(g_hZoneEngine);
+   if(g_hBiasCompass != INVALID_HANDLE) IndicatorRelease(g_hBiasCompass);
+}
+
+//+------------------------------------------------------------------+
+//| Timer function for heartbeat                                     |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    // A light heartbeat, prints roughly every 100 ticks
+    if((g_tickCount % 100) == 0)
+    {
+        Print(EVT_HEARTBEAT);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Trade Transaction Event Handler                                  |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(!EnableJournaling) return;
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryDealSelect(trans.deal))
+      {
+         if((ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == MagicNumber)
+         {
+            if(HistoryDealGetInteger(trans.deal, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+            {
+               ulong position_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+               if(!PositionSelectByTicket(position_id))
+               {
+                  if(!IsPositionLogged(position_id))
+                  {
+                     LogClosedPosition(position_id);
+                     AddToLoggedList(position_id);
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| OnTick: Event-driven logic                                      |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // === BEGIN Spec: Tick counter and heartbeat ===
+   g_tickCount++;
+   if((g_tickCount % 500) == 0)
+   {
+       Print(EVT_TICK);
+   }
+   // === END Spec ===
+
+   // Manage open positions on every tick
+   if(PositionSelect(_Symbol))
+   {
+      MqlDateTime dt;
+      TimeToStruct(TimeCurrent(), dt);
+      ManageOpenPositions(dt, !IsTradingSession());
+   }
+
+   // === BEGIN Spec: Non-blocking BarsCalculated guard ===
+   int bcSB = BarsCalculated(g_hSignalBrain);
+   int bcZE = BarsCalculated(g_hZoneEngine);
+   int bcBC = BarsCalculated(g_hBiasCompass);
+   if(bcSB < 2 || bcZE < 2 || bcBC < 2)
+   {
+       PrintFormat("%s BarsCalculated SB=%d ZE=%d BC=%d — deferring", EVT_WAIT, bcSB, bcZE, bcBC);
+       return; // Defer until indicators are ready
+   }
+   // === END Spec ===
+
+   // === BEGIN Spec: Explicit new-bar gate ===
+   datetime t = iTime(_Symbol, SignalTimeframe, 0);
+   if(t == 0) return; // Time data not yet available
+   if(t == g_lastBarTime) return; // Not a new bar
+   
+   PrintFormat("%s %s", EVT_FIRST_BAR_OR_NEW, TimeToString(t, TIME_DATE|TIME_MINUTES));
+   g_lastBarTime = t;
+   // === END Spec ===
+
+   // --- NEW BAR LOGIC STARTS HERE ---
+
+   // Handle dynamic input changes for timeframe
+   if(g_sbTF != SignalTimeframe)
+   {
+      if(EnableLogging) PrintFormat("%s Timeframe changed from %s to %s. Recreating handles.", EVT_INIT, EnumToString(g_sbTF), EnumToString(SignalTimeframe));
+      if(g_hSignalBrain != INVALID_HANDLE) IndicatorRelease(g_hSignalBrain);
+      if(g_hZoneEngine != INVALID_HANDLE) IndicatorRelease(g_hZoneEngine);
+      if(g_hBiasCompass != INVALID_HANDLE) IndicatorRelease(g_hBiasCompass);
+      g_sbTF = SignalTimeframe;
+      g_hSignalBrain = iCustom(_Symbol, g_sbTF, "AAI_Indicator_SignalBrain");
+      g_hZoneEngine  = iCustom(_Symbol, g_sbTF, "AAI_Indicator_ZoneEngine");
+      g_hBiasCompass = iCustom(_Symbol, g_sbTF, "AAI_Indicator_BiasCompass");
+      if(g_hSignalBrain == INVALID_HANDLE || g_hZoneEngine == INVALID_HANDLE || g_hBiasCompass == INVALID_HANDLE)
+      {
+         PrintFormat("%s Failed to recreate handles on TF change. EA will halt.", EVT_INIT);
+         return;
+      }
+   }
+
+   // Proceed with new bar logic
+   bool inSession = IsTradingSession();
+   if(EnableLogging)
+      PrintFormat("[BAR] srv=%s — InSession=%s", TimeToString(TimeCurrent()), inSession  ? "YES" : "NO");
+   
+   if(!PositionSelect(_Symbol))
+   {
+      CheckForNewTrades(inSession);
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Check & execute new entries based on SignalBrain & ZoneEngine    |
+//+------------------------------------------------------------------+
+void CheckForNewTrades(bool inSession)
+{
+   if(!inSession)
+   {
+      if(EnableLogging) PrintFormat("%s — Outside session. Skipping entries.", EVT_BAR);
+      return;
+   }
+
+   if(EnableEADebugLogging)
+   {
+      double dbg_zone_status, dbg_zone_strength, dbg_liq_grab;
+      double htf_bias, ltf_bias;
+
+      bool ze_ok = ReadBuf(g_hZoneEngine, 0, 1, dbg_zone_status) &&
+                   ReadBuf(g_hZoneEngine, 2, 1, dbg_zone_strength) &&
+                   ReadBuf(g_hZoneEngine, 5, 1, dbg_liq_grab);
+
+      int hBC_HTF = iCustom(_Symbol, HTF_DEBUG, "AAI_Indicator_BiasCompass");
+      int hBC_LTF = iCustom(_Symbol, LTF_DEBUG, "AAI_Indicator_BiasCompass");
+      
+      bool bc_ok = ReadBuf(hBC_HTF, 0, 1, htf_bias) &&
+                   ReadBuf(hBC_LTF, 0, 1, ltf_bias);
+      
+      IndicatorRelease(hBC_HTF);
+      IndicatorRelease(hBC_LTF);
+
+      if(ze_ok && bc_ok)
+      {
+         string debug_msg = StringFormat("EADebug | ZoneStatus: %.0f, ZoneStr: %.0f, LiqGrab: %s | HTFBias: %.1f, LTFBias: %.1f",
+                                     dbg_zone_status,
+                                     dbg_zone_strength,
+                                     (dbg_liq_grab > 0.5) ? "true" : "false",
+                                     htf_bias,
+                                     ltf_bias);
+         Print(debug_msg);
+      }
+      else
+      {
+         PrintFormat("%s EADebug: Failed to read indicator data. ZE_OK=%s, BC_OK=%s", EVT_BAR, ze_ok ? "true" : "false", bc_ok ? "true" : "false");
+      }
+   }
+
+   double sig_d, conf_d, reason_d, zonetf_d;
+   
+   if(!ReadBuf(g_hSignalBrain, 0, 1, sig_d)) { PrintFormat("❌ CopyBuffer failed: handle=%d buf=0 shift=1", g_hSignalBrain); return; }
+   if(!ReadBuf(g_hSignalBrain, 1, 1, conf_d)) { PrintFormat("❌ CopyBuffer failed: handle=%d buf=1 shift=1", g_hSignalBrain); return; }
+   if(!ReadBuf(g_hSignalBrain, 2, 1, reason_d)) { PrintFormat("❌ CopyBuffer failed: handle=%d buf=2 shift=1", g_hSignalBrain); return; }
+   if(!ReadBuf(g_hSignalBrain, 3, 1, zonetf_d)) { PrintFormat("❌ CopyBuffer failed: handle=%d buf=3 shift=1", g_hSignalBrain); return; }
+
+   int signal = (int)sig_d;
+   int confidence = (int)conf_d;
+   ENUM_REASON_CODE reasonCode = (ENUM_REASON_CODE)reason_d;
+
+   if(EnableLogging)
+      PrintFormat("   %s Brain Signal: %d, Confidence: %d, Reason: %s", EVT_BAR, signal, confidence, ReasonCodeToShortString(reasonCode));
+      
+   if(signal != 0 && confidence >= MinConfidenceToTrade)
+   {
+      double distal_level;
+      if(!ReadBuf(g_hZoneEngine, 7, 1, distal_level) || distal_level == 0.0)
+      {
+         PrintFormat("❌ Could not copy valid distal level from ZoneEngine. Handle: %d buf=7", g_hZoneEngine);
+         return;
+      }
+
+      double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
+      double sl = 0, tp = 0;
+      double sl_buffer_points = PriceFromPips(StopLossBufferPips);
+      double risk_points = 0;
+      double lots_to_trade = 0;
+
+      if(signal == 1) // BUY
+      {
+         sl = distal_level - sl_buffer_points;
+         risk_points = ask - sl;
+         if(risk_points <= 0) { PrintFormat("%s Invalid risk for BUY. Aborting.", EVT_ENTRY); return; }
+         tp = ask + risk_points * RiskRewardRatio;
+      }
+      else // SELL
+      {
+         sl = distal_level + sl_buffer_points;
+         risk_points = sl - bid;
+         if(risk_points <= 0) { PrintFormat("%s Invalid risk for SELL. Aborting.", EVT_ENTRY); return; }
+         tp = bid - risk_points * RiskRewardRatio;
+      }
+
+      lots_to_trade = CalculateLotSize(confidence, risk_points);
+      if(lots_to_trade < MinLotSize)
+      {
+         PrintFormat("%s Calculated lot size %.2f is below minimum %.2f. Aborting trade.", EVT_ENTRY, lots_to_trade, MinLotSize);
+         return;
+      }
+
+      double risk_pips = PipsFromPrice(risk_points);
+      string comment = StringFormat("AAI|C%d|R%d|Risk%.1f", confidence, (int)reasonCode, risk_pips);
+      
+      string signal_str = (signal == 1) ? "BUY" : "SELL";
+      bool is_allowed = (ExecutionMode == AutoExecute);
+      PrintFormat("%s mode=%s signal=%s conf=%d/20 reason=%s allowed=%s",
+                  EVT_ENTRY_CHECK, EnumToString(ExecutionMode), signal_str, confidence, ReasonCodeToShortString(reasonCode), is_allowed ? "YES" : "NO");
+
+      if(is_allowed)
+      {
+         if(signal == 1)
+         {
+            if(trade.Buy(lots_to_trade, symbolName, ask, sl, tp, comment))
+               PrintFormat("%s Signal:BUY → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f | Conf: %d | Reason: %s", EVT_ENTRY, lots_to_trade, trade.ResultPrice(), sl, tp, confidence, ReasonCodeToFullString(reasonCode));
+            else
+               PrintFormat("%s BUY failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
+         }
+         else if(signal == -1)
+         {
+            if(trade.Sell(lots_to_trade, symbolName, bid, sl, tp, comment))
+               PrintFormat("%s Signal:SELL → Executed %.2f lots @%.5f | SL:%.5f TP:%.5f | Conf: %d | Reason: %s", EVT_ENTRY, lots_to_trade, trade.ResultPrice(), sl, tp, confidence, ReasonCodeToFullString(reasonCode));
+            else
+               PrintFormat("%s SELL failed (Err:%d %s)", EVT_ENTRY, trade.ResultRetcode(), trade.ResultComment());
+         }
+      }
+      else
+      {
+         Print("%s mode=SignalsOnly", EVT_ORDER_BLOCKED);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Manage open positions                                            |
+//+------------------------------------------------------------------+
+void ManageOpenPositions(const MqlDateTime &loc, bool overnight)
+{
+   if(!PositionSelect(_Symbol)) return;
+   if(EnablePartialProfits)
+   {
+      HandlePartialProfits();
+      if(!PositionSelect(_Symbol)) return;
+   }
+
+   double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
+
+   ulong ticket = PositionGetInteger(POSITION_TICKET);
+   long type = PositionGetInteger(POSITION_TYPE);
+   double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currSL = PositionGetDouble(POSITION_SL);
+   double currPrice = (type==POSITION_TYPE_BUY ? bid : ask);
+   if(loc.day_of_week==FRIDAY && loc.hour>=FridayCloseHour)
+   {
+      PrintFormat("%s Fri-close → closing #%d", EVT_EXIT, ticket);
+      trade.PositionClose(ticket);
+      return;
+   }
+
+   double beDist = PriceFromPips(BreakEvenPips);
+   if(type==POSITION_TYPE_BUY && bid-openP>=beDist && (currSL < openP || currSL == 0))
+      if(trade.PositionModify(ticket, openP, PositionGetDouble(POSITION_TP)))
+      {
+         currSL=openP;
+         PrintFormat("%s BE BUY #%d", EVT_TS, ticket);
+      }
+   else if(type==POSITION_TYPE_SELL && openP-ask>=beDist && (currSL > openP || currSL == 0))
+      if(trade.PositionModify(ticket, openP, PositionGetDouble(POSITION_TP)))
+      {
+         currSL=openP;
+         PrintFormat("%s BE SELL #%d", EVT_TS, ticket);
+      }
+
+   HandleTrailingStop(ticket, type, openP, currSL, currPrice, overnight);
+}
+
+//+------------------------------------------------------------------+
+//| Handle Partial Profit Logic                                      |
+//+------------------------------------------------------------------+
+void HandlePartialProfits()
+{
+   string comment = PositionGetString(POSITION_COMMENT);
+   if(StringFind(comment, "|P1") != -1) return;
+
+   string parts[];
+   if(StringSplit(comment, '|', parts) < 4) return;
+
+   string risk_part = parts[3];
+   StringReplace(risk_part, "Risk", "");
+   double initial_risk_pips = StringToDouble(risk_part);
+   if(initial_risk_pips <= 0) return;
+
+   long type = PositionGetInteger(POSITION_TYPE);
+   double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+   double current_profit_pips = 0;
+
+   if(type == POSITION_TYPE_BUY)
+      current_profit_pips = PipsFromPrice(SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price);
+   else
+      current_profit_pips = PipsFromPrice(open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK));
+
+   if(current_profit_pips >= initial_risk_pips * PartialProfitRR)
+   {
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double close_volume = volume * (PartialClosePercent / 100.0);
+
+      double lot_step = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
+      close_volume = round(close_volume / lot_step) * lot_step;
+
+      if(close_volume < lot_step) return;
+      PrintFormat("%s Profit target of %.1fR reached. Closing %.2f lots (%.0f%%) of ticket #%d.",
+                  EVT_PARTIAL, PartialProfitRR, close_volume, PartialClosePercent, ticket);
+      if(trade.PositionClosePartial(ticket, close_volume))
+      {
+         PrintFormat("%s Partial closed. Moving SL to BE for remaining position.", EVT_PARTIAL);
+         if(trade.PositionModify(ticket, open_price, PositionGetDouble(POSITION_TP)))
+         {
+            string new_comment = comment + "|P1";
+            MqlTradeRequest request;
+            MqlTradeResult  result;
+            ZeroMemory(request);
+            request.action = TRADE_ACTION_MODIFY;
+            request.position = ticket;
+            request.sl = open_price;
+            request.tp = PositionGetDouble(POSITION_TP);
+            request.comment = new_comment;
+            if(!OrderSend(request, result))
+            {
+               PrintFormat("%s Failed to send position modify request. Error: %d", EVT_PARTIAL, GetLastError());
+            }
+            else if(result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_PLACED)
+            {
+               PrintFormat("%s Failed to modify position comment. Server response: %s (%d)", EVT_PARTIAL, trade.ResultComment(), result.retcode);
+            }
+         }
+      }
+      else
+      {
+         PrintFormat("%s Failed to close partial position. Error: %d", EVT_PARTIAL, trade.ResultRetcode());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trailing-stop logic                                              |
+//+------------------------------------------------------------------+
+void HandleTrailingStop(ulong ticket,long type,double openP,double currSL,double currPrice,bool overnight)
+{
+   if(currSL<=0.0) return;
+   double trailDist = PriceFromPips(overnight ? OvernightTrailPips : TrailingStopPips);
+   double startDist = PriceFromPips(TrailingStartPips);
+   double newSL = currSL;
+
+   bool canTrail = (overnight ||
+                    (type==POSITION_TYPE_BUY && currPrice-openP>=startDist) ||
+                    (type==POSITION_TYPE_SELL && openP-currPrice>=startDist));
+   if(!canTrail) return;
+
+   if(type==POSITION_TYPE_BUY && currPrice-trailDist>currSL)
+      newSL = currPrice-trailDist;
+   else if(type==POSITION_TYPE_SELL && currPrice+trailDist<currSL)
+      newSL = currPrice+trailDist;
+   if(newSL!=currSL)
+      if(trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP)))
+         PrintFormat("%s %s Trail #%d → %.5f",
+                     EVT_TS,
+                     (overnight?"O/N":"Session"),
+                     ticket, newSL);
+}
+
+//+------------------------------------------------------------------+
+//| Is it within the trading session?                                |
+//+------------------------------------------------------------------+
+bool IsTradingSession()
+{
+   datetime nowSrv = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(nowSrv, dt);
+   if(dt.day_of_week < MONDAY || dt.day_of_week > FRIDAY)
+      return false;
+   int curMin = dt.hour*60 + dt.min;
+   int startTotalMin = StartHour * 60 + StartMinute;
+   int endTotalMin = EndHour * 60 + EndMinute;
+   return (curMin >= startTotalMin && curMin < endTotalMin);
+}
+
+//+------------------------------------------------------------------+
+//| JOURNALING: Write CSV header if file doesn't exist               |
+//+------------------------------------------------------------------+
+void WriteJournalHeader()
+{
+   if(FileIsExist(JournalFileName, 0)) return;
+   int handle = FileOpen(JournalFileName, FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   if(handle != INVALID_HANDLE)
+   {
+      FileWriteString(handle, "PositionID,Symbol,Type,Volume,EntryTime,EntryPrice,ExitTime,ExitPrice,Commission,Swap,Profit,Comment\n");
+      FileClose(handle);
+   }
+   else
+   {
+      PrintFormat("%s Could not create journal file '%s'. Error: %d", EVT_JOURNAL, JournalFileName, GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| JOURNALING: Log a closed position's details to the CSV           |
+//+------------------------------------------------------------------+
+void LogClosedPosition(ulong position_id)
+{
+   if(!HistorySelectByPosition(position_id))
+   {
+      PrintFormat("%s Could not select history for position #%d.", EVT_JOURNAL, position_id);
+      return;
+   }
+
+   int deals_total = HistoryDealsTotal();
+   double total_profit = 0, total_commission = 0, total_swap = 0, total_volume = 0;
+   datetime entry_time = 0, exit_time = 0;
+   double entry_price = 0, exit_price = 0;
+   string pos_symbol = "", pos_comment = "";
+   int pos_type = -1;
+   for(int i = 0; i < deals_total; i++)
+   {
+      ulong deal_ticket = HistoryDealGetTicket(i);
+      total_profit += HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
+      total_commission += HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
+      total_swap += HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+      
+      long entry_type = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
+      if(entry_type == DEAL_ENTRY_IN)
+      {
+         if(entry_time == 0)
+         {
+            entry_time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+            entry_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+            pos_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+            pos_comment = HistoryDealGetString(deal_ticket, DEAL_COMMENT);
+            pos_type = (int)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
+            total_volume += HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+         }
+      }
+      else
+      {
+         exit_time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+         exit_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+      }
+   }
+   
+   if(pos_symbol == "") return;
+   string type_str = (pos_type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+   string entry_time_str = TimeToString(entry_time, TIME_DATE|TIME_SECONDS);
+   string exit_time_str = TimeToString(exit_time, TIME_DATE|TIME_SECONDS);
+   StringReplace(pos_comment, ",", ";");
+
+   string csv_line = StringFormat("%d,%s,%s,%.2f,%s,%.5f,%s,%.5f,%.2f,%.2f,%.2f,%s",
+                                  position_id,
+                                  pos_symbol,
+                                  type_str,
+                                  total_volume,
+                                  entry_time_str,
+                                  entry_price,
+                                  exit_time_str,
+                                  exit_price,
+                                  total_commission,
+                                  total_swap,
+                                  total_profit,
+                                  pos_comment
+                                  );
+   int handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   if(handle != INVALID_HANDLE)
+   {
+      FileSeek(handle, 0, SEEK_END);
+      FileWriteString(handle, csv_line + "\n");
+      FileClose(handle);
+      PrintFormat("%s Logged closed position #%d to journal.", EVT_JOURNAL, position_id);
+   }
+   else
+   {
+      PrintFormat("%s Could not open journal file '%s' to write. Error: %d", EVT_JOURNAL, JournalFileName, GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| JOURNALING: Helper to track logged positions                     |
+//+------------------------------------------------------------------+
+bool IsPositionLogged(ulong position_id)
+{
+   for(int i=0; i<g_logged_positions_total; i++)
+   {
+      if(g_logged_positions[i] == position_id) return true;
+   }
+   return false;
+}
+
+void AddToLoggedList(ulong position_id)
+{
+   if(IsPositionLogged(position_id)) return;
+   int new_size = g_logged_positions_total + 1;
+   ArrayResize(g_logged_positions, new_size);
+   g_logged_positions[new_size - 1] = position_id;
+   g_logged_positions_total = new_size;
+}
+
+//+------------------------------------------------------------------+
+//| HELPER: Converts Reason Code to String                           |
+//+------------------------------------------------------------------+
+string ReasonCodeToFullString(ENUM_REASON_CODE code)
+{
+   switch(code)
+   {
+      case REASON_BUY_HTF_CONTINUATION:  return "Buy signal: HTF Continuation.";
+      case REASON_SELL_HTF_CONTINUATION: return "Sell signal: HTF Continuation.";
+      case REASON_BUY_LIQ_GRAB_ALIGNED:  return "Buy signal: Liquidity Grab in Demand Zone with Bias Alignment.";
+      case REASON_SELL_LIQ_GRAB_ALIGNED: return "Sell signal: Liquidity Grab in Supply Zone with Bias Alignment.";
+      case REASON_NO_ZONE:               return "No Zone";
+      case REASON_LOW_ZONE_STRENGTH:     return "Low Zone Strength";
+      case REASON_BIAS_CONFLICT:         return "Bias Conflict";
+      case REASON_NONE:
+      default:                           return "N/A";
+   }
+}
+
+string ReasonCodeToShortString(ENUM_REASON_CODE code)
+{
+   switch(code)
+   {
+      case REASON_BUY_HTF_CONTINUATION:  return "BuyCont";
+      case REASON_SELL_HTF_CONTINUATION: return "SellCont";
+      case REASON_BUY_LIQ_GRAB_ALIGNED:  return "BuyLiqGrab";
+      case REASON_SELL_LIQ_GRAB_ALIGNED: return "SellLiqGrab";
+      case REASON_NO_ZONE:               return "NoZone";
+      case REASON_LOW_ZONE_STRENGTH:     return "LowStrength";
+      case REASON_BIAS_CONFLICT:         return "Conflict";
+      case REASON_NONE:
+      default:                           return "None";
+   }
+}
+//+------------------------------------------------------------------+
