@@ -1,0 +1,250 @@
+//+------------------------------------------------------------------+
+//|                  AAI_Indicator_SignalBrain.mq5                   |
+//|                 v2.5 - Non-blocking Calculation                  |
+//|          Acts as the confluence and trade signal engine.         |
+//|                                                                  |
+//| Copyright 2025, AlfredAI Project                    |
+//+------------------------------------------------------------------+
+
+#property indicator_chart_window
+#property strict
+#property version "2.5"
+
+// === BEGIN Spec: Headless + buffers ===
+#property indicator_plots   0
+#property indicator_buffers 4
+
+// --- Buffer declarations
+#property indicator_label1  "TradeSignal"
+double BufSignal[];
+#property indicator_label2  "ConfidenceScore"
+double BufConf[];
+#property indicator_label3  "ReasonCode"
+double BufReason[];
+#property indicator_label4  "ZoneTimeframe"
+double BufZoneTF[];
+// === END Spec ===
+
+//--- Indicator Inputs ---
+input int  MinZoneStrength    = 4;
+// Minimum zone strength score (1-10) to consider for a signal
+
+// === SAFE TEST HARNESS (SignalBrain) ===
+input bool SB_SafeTest = false;   // when true, bypass heavy logic and publish deterministic values
+static const int SB_WARMUP = 50;  // minimal bars to skip before emitting test signals
+
+// Fills buffers deterministically so CopyBuffer(..., shift=1) always succeeds.
+// Call this at the very start of OnCalculate when SB_SafeTest==true.
+void SB_SafeFill(const int rates_total, const int prev_calculated,
+                 double &BufSignal[], double &BufConf[], double &BufReason[], double &BufZoneTF[])
+{
+   int start = (prev_calculated>0 ? prev_calculated-1 : MathMin(SB_WARMUP, rates_total-1));
+   if(start < 0) start = 0;
+
+   for(int i=start; i<rates_total; ++i)
+   {
+      // Deterministic, non-blocking pattern: every 16 bars set BUY; every 32 bars set SELL; else none.
+      int k = (i % 32);
+      double s = (k==0 ? 1.0 : (k==16 ? -1.0 : 0.0));
+      double c = (s!=0.0 ? 10.0 : 0.0);        // mid confidence so EA can pass MinConfidence
+      int    r = (s>0.0 ? 1 : (s<0.0 ? 2 : 0)); // 0=None, 1=BUY_*, 2=SELL_* (map to your ENUM_REASON_CODE)
+      double z = (double)PeriodSeconds(_Period);
+
+      BufSignal[i] = s;
+      BufConf[i]   = c;
+      BufReason[i] = (double)r;
+      BufZoneTF[i] = z;
+   }
+}
+
+
+
+// --- Enums for Clarity
+enum ENUM_TRADE_SIGNAL
+{
+    SIGNAL_NONE = 0,
+    SIGNAL_BUY  = 1,
+    SIGNAL_SELL = -1
+};
+enum ENUM_REASON_CODE
+{
+    REASON_NONE,
+    REASON_BUY_HTF_CONTINUATION,     // Standard Buy: HTF Trend + Zone Pullback
+    REASON_SELL_HTF_CONTINUATION,    // Standard Sell: HTF Trend + Zone Pullback
+    REASON_BUY_LIQ_GRAB_ALIGNED,     // Premium Buy: Std + Liq Grab
+    REASON_SELL_LIQ_GRAB_ALIGNED,    // Premium Sell: Std + Liq Grab
+    REASON_NO_ZONE,
+    REASON_LOW_ZONE_STRENGTH,
+    REASON_BIAS_CONFLICT
+};
+// --- Constants for Analysis
+const ENUM_TIMEFRAMES HTF = PERIOD_H4;
+const ENUM_TIMEFRAMES LTF = PERIOD_M15;
+// --- DEBUG FLAG ---
+const bool EnableDebugLogging = true; // DEBUG: This is now hard-coded to ON for testing.
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // === BEGIN Spec: Bind and configure buffers ===
+    bool ok = true;
+    ok &= SetIndexBuffer(0, BufSignal, INDICATOR_DATA);
+    ok &= SetIndexBuffer(1, BufConf,   INDICATOR_DATA);
+    ok &= SetIndexBuffer(2, BufReason, INDICATOR_DATA);
+    ok &= SetIndexBuffer(3, BufZoneTF, INDICATOR_DATA);
+
+    if(!ok)
+    {
+        Print("SB SetIndexBuffer failed");
+        return(INIT_FAILED);
+    }
+
+    ArraySetAsSeries(BufSignal, true);
+    ArraySetAsSeries(BufConf,   true);
+    ArraySetAsSeries(BufReason, true);
+    ArraySetAsSeries(BufZoneTF, true);
+
+    // NOTE: 'SetIndexEmptyValue' is not a valid MQL5 function.
+    // The OnCalculate loop explicitly writes 0.0 to fulfill this requirement.
+    // === END Spec ===
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Main Calculation - Non-blocking and incremental                  |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+// --- short-circuit to safe, non-blocking buffer fill ---
+if(SB_SafeTest)
+{
+   SB_SafeFill(rates_total, prev_calculated, BufSignal, BufConf, BufReason, BufZoneTF);
+   return(rates_total); // IMPORTANT: skip the rest of your heavy logic
+}
+
+    // === BEGIN Spec: Canonical incremental pattern ===
+    const int WARMUP = 150; // Warmup bars required for dependent indicators
+
+    if(rates_total <= 0) return(0);
+
+    // Determine the starting bar for calculation
+    int start = (prev_calculated > 0 ? prev_calculated - 1 : 0);
+    if(start < WARMUP && rates_total > WARMUP)
+    {
+        start = WARMUP; // Ensure we start after the warmup period on the first full calculation
+    }
+
+    for(int i = start; i < rates_total; ++i)
+    {
+        // Define a shift to read historical data from other indicators relative to the current bar 'i'
+        int shift = rates_total - 1 - i;
+
+        //--- Initialize local variables for the current bar's calculation
+        double s = 0.0;   // Signal
+        double c = 0.0;   // Confidence
+        int    r = REASON_NONE; // Reason Code
+        int    ztf = 0;   // Zone Timeframe in seconds
+
+        //--- Fetch data from AAI Modules using the correct historical shift
+        // We only proceed if we have enough bars for our lookbacks
+        if(i >= WARMUP)
+        {
+            double zone_engine_data[6];
+            if(CopyBuffer(iCustom(_Symbol, _Period, "AAI_Indicator_ZoneEngine.ex5"), 0, shift, 6, zone_engine_data) >= 6)
+            {
+                double zone_status         = zone_engine_data[0];
+                double zone_strength       = zone_engine_data[2];
+                bool   has_liquidity_grab  = (zone_engine_data[5] > 0.5);
+
+                double htf_bias_arr[1], ltf_bias_arr[1];
+                CopyBuffer(iCustom(_Symbol, HTF, "AAI_Indicator_BiasCompass.ex5"), 0, shift, 1, htf_bias_arr);
+                CopyBuffer(iCustom(_Symbol, LTF, "AAI_Indicator_BiasCompass.ex5"), 0, shift, 1, ltf_bias_arr);
+                double htf_bias = htf_bias_arr[0];
+                double ltf_bias = ltf_bias_arr[0];
+                
+                //--- Main analysis logic (unchanged) ---
+                if(zone_status == 0)
+                {
+                    r = REASON_NO_ZONE;
+                }
+                else if(zone_strength < MinZoneStrength)
+                {
+                    r = REASON_LOW_ZONE_STRENGTH;
+                }
+                else
+                {
+                    if (htf_bias * ltf_bias < -0.5)
+                    {
+                        r = REASON_BIAS_CONFLICT;
+                    }
+                    else
+                    {
+                        if(has_liquidity_grab)
+                        {
+                            if(zone_status > 0.5 && ltf_bias > 0.5)
+                            {
+                                s = SIGNAL_BUY; r = REASON_BUY_LIQ_GRAB_ALIGNED; c = 13;
+                                if (htf_bias > 0.5) c += 5;
+                            }
+                            else if(zone_status < -0.5 && ltf_bias < -0.5)
+                            {
+                                s = SIGNAL_SELL; r = REASON_SELL_LIQ_GRAB_ALIGNED; c = 13;
+                                if (htf_bias < -0.5) c += 5;
+                            }
+                        }
+                        
+                        if(s == SIGNAL_NONE)
+                        {
+                            if(zone_status > 0.5 && htf_bias > 0.5)
+                            {
+                                s = SIGNAL_BUY; r = REASON_BUY_HTF_CONTINUATION; c = 8;
+                            }
+                            else if(zone_status < -0.5 && htf_bias < -0.5)
+                            {
+                                s = SIGNAL_SELL; r = REASON_SELL_HTF_CONTINUATION; c = 8;
+                            }
+                        }
+                    }
+                }
+                
+                //--- Finalize values ---
+                c = MathMax(0, MathMin(20, c));
+                if(c == 0)
+                {
+                   s = SIGNAL_NONE;
+                   if(r != REASON_NO_ZONE && r != REASON_LOW_ZONE_STRENGTH && r != REASON_BIAS_CONFLICT)
+                   {
+                      r = REASON_NONE;
+                   }
+                }
+                
+                if(s != SIGNAL_NONE)
+                {
+                    ztf = PeriodSeconds(_Period);
+                }
+            }
+        }
+        // If before WARMUP or CopyBuffer fails, the default zero values will be written.
+
+        //--- Write results for bar i (never EMPTY_VALUE)
+        BufSignal[i] = s;
+        BufConf[i]   = c;
+        BufReason[i] = (double)r;
+        BufZoneTF[i] = (double)ztf;
+    }
+    return(rates_total);
+    // === END Spec ===
+}
+//+------------------------------------------------------------------+
