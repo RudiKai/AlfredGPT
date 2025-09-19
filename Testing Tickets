@@ -9,10 +9,10 @@ double   AAI_gross_loss   = 0.0;
 // sum of negative net P&L (stored as positive abs)
 double   AAI_sum_win      = 0.0;
 // for avg win
-double   AAI_sum_loss_abs = 0.0;     // for avg loss (abs)
+double   AAI_sum_loss_abs = 0.0;      // for avg loss (abs)
 int      AAI_win_count = 0, AAI_loss_count = 0;
-double   AAI_curve = 0.0;            // equity curve (closed-trade increments)
-double   AAI_peak  = 0.0;            // peak of curve
+double   AAI_curve = 0.0;             // equity curve (closed-trade increments)
+double   AAI_peak  = 0.0;             // peak of curve
 double   AAI_max_dd = 0.0;
 // max drawdown (abs) on closed-trade curve
 
@@ -48,7 +48,7 @@ int    AAI_dur_count   = 0;
 // ==================== /AAI METRICS ======================
 //+------------------------------------------------------------------+
 //| AAI_EA_Trade_Manager.mq5                                         |
-//|                       v5.10 - SL Cluster Micro-Cooldowns         |
+//|                           v5.10 - SL Cluster Micro-Cooldowns     |
 //|                                                                  |
 //| (Consumes all data from the refactored AAI_Indicator_SignalBrain)|
 //|                                                                  |
@@ -102,7 +102,7 @@ int    AAI_dur_count   = 0;
 #define SB_BUF_BC       6
 
 // --- T037: Position Health Watchdog (PHW) Constants ---
-const bool   PHW_Enable              = true;
+const bool   PHW_Enable            = true;
 const int    PHW_FailBurstN          = 3;
 const int    PHW_FailBurstWindowSec  = 15;
 const int    PHW_SpreadSpikePoints   = 25;
@@ -134,6 +134,22 @@ const int    SLC_ResetHour           = 0;
 const bool   SLC_DirSpecific         = true;
 const int    SLC_History             = 12;
 const bool   SLC_LogVerbose          = false;
+
+// --- T040: Execution Analytics & Adaptive Slippage (EA+AS) ---
+const bool   EA_Enable           = true;
+const int    EA_EwmaTrades       = 12;
+const int    EA_BaseDeviationPts = 8;
+const int    EA_MinDeviationPts  = 4;
+const int    EA_MaxDeviationPts  = 40;
+const double EA_DevVsSlipMul     = 1.20;
+const double EA_DevVsSpreadFrac  = 0.60;
+const int    EA_RejBumpPts       = 4;
+// replace the const with this:
+enum { EA_RejWindowTrades = 8 };
+const int    EA_LatBumpMs        = 250;
+const int    EA_LatBumpPts       = 2;
+const bool   EA_LogVerbose       = false;
+
 
 // --- EA Fixes (Part B): Indicator Path Helper ---
 #define AAI_IND_PREFIX "AlfredAI\\"
@@ -280,7 +296,7 @@ enum ENUM_PT_SLA { PT_SLA_NONE=0, PT_SLA_TO_BE=1, PT_SLA_LOCK_OFFSET=2 };
 input ENUM_EXECUTION_MODE ExecutionMode = AutoExecute;
 input ENUM_APPROVAL_MODE  ApprovalMode  = None;
 input ENUM_ENTRY_MODE     EntryMode     = FirstBarOrEdge;
-input ulong   MagicNumber         = 1337;
+input ulong  MagicNumber         = 1337;
 input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_CURRENT;
 input int SB_ReadShift = 1;
 input int WarmupBars = 200;
@@ -299,37 +315,37 @@ input double InpSB_ConflictPenalty = 0.80;
 // --- All Pass-Through Inputs for the new SignalBrain ---
 input group "--- SignalBrain Pass-Through Inputs ---";
 // Core SB Settings
-input bool   SB_SafeTest        = false;
-input bool   SB_UseZE           = true;
-input bool   SB_UseBC           = true;
-input bool   SB_UseSMC          = true;
-input int    SB_WarmupBars      = 150;
-input int    SB_FastMA          = 10;
-input int    SB_SlowMA          = 30;
-input int    SB_MinZoneStrength = 4;
-input bool   SB_EnableDebug     = true;
+input bool   SB_SafeTest          = false;
+input bool   SB_UseZE             = true;
+input bool   SB_UseBC             = true;
+input bool   SB_UseSMC            = true;
+input int    SB_WarmupBars        = 150;
+input int    SB_FastMA            = 10;
+input int    SB_SlowMA            = 30;
+input int    SB_MinZoneStrength   = 4;
+input bool   SB_EnableDebug       = true;
 // SB Confidence Model (Additive Path)
-input int    SB_Bonus_ZE        = 25;
-input int    SB_Bonus_BC        = 25;
-input int    SB_Bonus_SMC       = 25;
-input int    SB_BaseConf        = 40;
+input int    SB_Bonus_ZE          = 25;
+input int    SB_Bonus_BC          = 25;
+input int    SB_Bonus_SMC         = 25;
+input int    SB_BaseConf          = 40;
 // BC Pass-Through
-input int    SB_BC_FastMA       = 10;
-input int    SB_BC_SlowMA       = 30;
+input int    SB_BC_FastMA         = 10;
+input int    SB_BC_SlowMA         = 30;
 // ZE Pass-Through
 input double SB_ZE_MinImpulseMovePips = 10.0;
 // SMC Pass-Through
-input bool   SB_SMC_UseFVG      = true;
-input bool   SB_SMC_UseOB       = true;
-input bool   SB_SMC_UseBOS      = true;
-input double SB_SMC_FVG_MinPips = 1.0;
-input int    SB_SMC_OB_Lookback = 20;
-input int    SB_SMC_BOS_Lookback= 50;
+input bool   SB_SMC_UseFVG        = true;
+input bool   SB_SMC_UseOB         = true;
+input bool   SB_SMC_UseBOS        = true;
+input double SB_SMC_FVG_MinPips   = 1.0;
+input int    SB_SMC_OB_Lookback   = 20;
+input int    SB_SMC_BOS_Lookback  = 50;
 
 
 //--- Risk Management Inputs ---
 input group "Risk Management"
-input int     SL_Buffer_Points  = 10;
+input int    SL_Buffer_Points  = 10;
 
 // --- Confidence → Risk Curve (T032) ---
 input group "Confidence → Risk Curve"
@@ -353,13 +369,13 @@ input double        InpCRC_PW_R3         = 0.95;
 
 //--- Trade Management Inputs ---
 input group "Trade Management"
-input bool    PerBarDebounce       = true;
-input uint    DuplicateGuardMs     = 300;
-input int     CooldownAfterSLBars  = 2;
-input int     MaxSpreadPoints      = 30;
-input int     MaxSlippagePoints    = 20;
-input int     FridayCloseHour      = 22;
-input bool    EnableLogging        = true;
+input bool   PerBarDebounce      = true;
+input uint   DuplicateGuardMs    = 300;
+input int    CooldownAfterSLBars = 2;
+input int    MaxSpreadPoints     = 30;
+input int    MaxSlippagePoints   = 20;
+input int    FridayCloseHour     = 22;
+input bool   EnableLogging       = true;
 //--- Telegram Alerts ---
 input group "Telegram Alerts"
 input bool   UseTelegramFromEA = false;
@@ -398,11 +414,11 @@ void AAI_Trim(string &s)
 //////////
 //--- Exit Strategy Inputs (M15 Baseline) ---
 input group "Exit Strategy"
-input bool    Exit_FixedRR        = true;
-input double  Fixed_RR            = 1.6;
-input double  Partial_Pct         = 50.0;
-input double  Partial_R_multiple  = 1.0;
-input int     BE_Offset_Points    = 1;
+input bool   Exit_FixedRR        = true;
+input double Fixed_RR            = 1.6;
+input double Partial_Pct         = 50.0;
+input double Partial_R_multiple  = 1.0;
+input int    BE_Offset_Points    = 1;
 
 // --- Trailing / Break-Even (T035) ---
 input group "Trailing / Break-Even"
@@ -427,44 +443,44 @@ input bool          InpTRL_LogVerbose      = false;
 
 // --- Partial Take-Profit Ladder (T036) ---
 input group "Partial Take-Profit Ladder"
-input bool    InpPT_Enable            = true;
-input bool    InpPT_OnBarClose        = true;      // evaluate on closed bars when true
-input int     InpPT_MinSecondsBetween = 10;        // throttle per-symbol between actions
+input bool        InpPT_Enable          = true;
+input bool        InpPT_OnBarClose      = true;      // evaluate on closed bars when true
+input int         InpPT_MinSecondsBetween = 10;        // throttle per-symbol between actions
 // Step 1
-input bool    InpPT1_Enable           = true;
-input double  InpPT1_TriggerRR        = 1.00;      // trigger when RR >= this (uses initial SL distance)
-input int     InpPT1_TriggerPts       = 0;         // OR when raw profit >= this (points); 0=off
-input double  InpPT1_ClosePct         = 33.0;      // % of ORIGINAL entry lots to close
-input ENUM_PT_SLA InpPT1_SLA          = PT_SLA_TO_BE;
-input int     InpPT1_SLA_OffsetPts    = 2;         // used for TO_BE / LOCK_OFFSET
+input bool        InpPT1_Enable         = true;
+input double      InpPT1_TriggerRR      = 1.00;      // trigger when RR >= this (uses initial SL distance)
+input int         InpPT1_TriggerPts     = 0;         // OR when raw profit >= this (points); 0=off
+input double      InpPT1_ClosePct       = 33.0;      // % of ORIGINAL entry lots to close
+input ENUM_PT_SLA InpPT1_SLA            = PT_SLA_TO_BE;
+input int         InpPT1_SLA_OffsetPts  = 2;         // used for TO_BE / LOCK_OFFSET
 // Step 2
-input bool    InpPT2_Enable           = true;
-input double  InpPT2_TriggerRR        = 1.50;
-input int     InpPT2_TriggerPts       = 0;
-input double  InpPT2_ClosePct         = 33.0;
-input ENUM_PT_SLA InpPT2_SLA          = PT_SLA_LOCK_OFFSET;
-input int     InpPT2_SLA_OffsetPts    = 10;
+input bool        InpPT2_Enable         = true;
+input double      InpPT2_TriggerRR      = 1.50;
+input int         InpPT2_TriggerPts     = 0;
+input double      InpPT2_ClosePct       = 33.0;
+input ENUM_PT_SLA InpPT2_SLA            = PT_SLA_LOCK_OFFSET;
+input int         InpPT2_SLA_OffsetPts  = 10;
 // Step 3
-input bool    InpPT3_Enable           = true;
-input double  InpPT3_TriggerRR        = 2.00;
-input int     InpPT3_TriggerPts       = 0;
-input double  InpPT3_ClosePct         = 34.0;
-input ENUM_PT_SLA InpPT3_SLA          = PT_SLA_LOCK_OFFSET;
-input int     InpPT3_SLA_OffsetPts    = 20;
+input bool        InpPT3_Enable         = true;
+input double      InpPT3_TriggerRR      = 2.00;
+input int         InpPT3_TriggerPts     = 0;
+input double      InpPT3_ClosePct       = 34.0;
+input ENUM_PT_SLA InpPT3_SLA            = PT_SLA_LOCK_OFFSET;
+input int         InpPT3_SLA_OffsetPts  = 20;
 // Logging
-input bool    InpPT_LogVerbose        = false;
+input bool        InpPT_LogVerbose      = false;
 
 
 //--- Entry Filter Inputs (M15 Baseline) ---
 input group "Entry Filters"
-input int         MinConfidence       = 50;
+input int        MinConfidence       = 50;
 // --- T011: Over-extension Inputs ---
 input group "Over-extension Guard"
 input ENUM_OVEREXT_MODE OverExtMode = WaitForBand;
-input int    OverExt_MA_Period     = 20;
-input int    OverExt_ATR_Period    = 14;
-input double OverExt_ATR_Mult      = 2.0;
-input int    OverExt_WaitBars      = 3;
+input int    OverExt_MA_Period   = 20;
+input int    OverExt_ATR_Period  = 14;
+input double OverExt_ATR_Mult    = 2.0;
+input int    OverExt_WaitBars    = 3;
 
 //--- T022: Volatility Regime Inputs ---
 input group "Volatility Regime"
@@ -478,19 +494,19 @@ input int    InpVR_PrefPenalty = 4;
 
 //--- News/Event Gate Inputs (T024) ---
 input group "News/Event Gate"
-input bool   InpNews_Enable        = false;
-input string InpNews_CsvName       = "AAI_News.csv";    // From Common Files
-input ENUM_NEWS_Mode InpNews_Mode  = NEWS_REQUIRED;
-input bool   InpNews_TimesAreUTC   = true;
-input bool   InpNews_FilterHigh    = true;
-input bool   InpNews_FilterMedium  = true;
-input bool   InpNews_FilterLow     = false;
-input int    InpNews_PrefPenalty   = 5;
+input bool   InpNews_Enable      = false;
+input string InpNews_CsvName     = "AAI_News.csv";   // From Common Files
+input ENUM_NEWS_Mode InpNews_Mode = NEWS_REQUIRED;
+input bool   InpNews_TimesAreUTC = true;
+input bool   InpNews_FilterHigh  = true;
+input bool   InpNews_FilterMedium= true;
+input bool   InpNews_FilterLow   = false;
+input int    InpNews_PrefPenalty = 5;
 
 //--- Structure Proximity Gate Inputs (T027) ---
 input group "Structure Proximity"
 enum ENUM_SP_Mode { SP_OFF=0, SP_REQUIRED=1, SP_PREFERRED=2 };
-input ENUM_SP_Mode InpSP_Mode                = SP_REQUIRED;
+input ENUM_SP_Mode InpSP_Mode              = SP_REQUIRED;
 input bool   InpSP_Enable              = true;
 input bool   InpSP_UseATR              = true;
 input int    InpSP_ATR_Period          = 14;
@@ -523,19 +539,19 @@ input int           InpAS_PrefPenalty     = 2;
 
 // --- Inter-Market Confirmation (T029) ---
 input group "Inter-Market Confirmation"
-enum ENUM_IMC_Mode   { IMC_OFF=0, IMC_REQUIRED=1, IMC_PREFERRED=2 };
-enum ENUM_IMC_Rel    { IMC_ALIGN=1, IMC_CONTRA=-1 };
+enum ENUM_IMC_Mode  { IMC_OFF=0, IMC_REQUIRED=1, IMC_PREFERRED=2 };
+enum ENUM_IMC_Rel   { IMC_ALIGN=1, IMC_CONTRA=-1 };
 enum ENUM_IMC_Method { IMC_ROC=0 };
 input bool          InpIMC_Enable         = true;
 input ENUM_IMC_Mode InpIMC_Mode           = IMC_REQUIRED;
 input string        InpIMC1_Symbol        = "";
-input ENUM_TIMEFRAMES InpIMC1_Timeframe   = PERIOD_H1;
+input ENUM_TIMEFRAMES InpIMC1_Timeframe     = PERIOD_H1;
 input ENUM_IMC_Rel  InpIMC1_Relation      = IMC_CONTRA;
 input ENUM_IMC_Method InpIMC1_Method      = IMC_ROC;
 input int           InpIMC1_LookbackBars  = 10;
 input double        InpIMC1_MinAbsRocBps  = 0.0;
 input string        InpIMC2_Symbol        = "";
-input ENUM_TIMEFRAMES InpIMC2_Timeframe   = PERIOD_H1;
+input ENUM_TIMEFRAMES InpIMC2_Timeframe     = PERIOD_H1;
 input ENUM_IMC_Rel  InpIMC2_Relation      = IMC_ALIGN;
 input ENUM_IMC_Method InpIMC2_Method      = IMC_ROC;
 input int           InpIMC2_LookbackBars  = 10;
@@ -588,14 +604,14 @@ input bool         InpSLTA_LogVerbose   = false;
 
 // --- Post-Fill Harmonizer (T034) ---
 input group "Post-Fill Harmonizer"
-input bool       InpHM_Enable        = true;
+input bool         InpHM_Enable        = true;
 input ENUM_HM_Mode InpHM_Mode        = HM_DELAYED_RETRY;
-input int        InpHM_DelayMs       = 300;
-input int        InpHM_MaxRetries    = 3;
-input int        InpHM_BackoffMs     = 400;
-input int        InpHM_MinChangePts  = 2;
-input bool       InpHM_RespectFreeze = true;
-input bool       InpHM_LogVerbose    = false;
+input int          InpHM_DelayMs       = 300;
+input int          InpHM_MaxRetries    = 3;
+input int          InpHM_BackoffMs     = 400;
+input int          InpHM_MinChangePts  = 2;
+input bool         InpHM_RespectFreeze = true;
+input bool         InpHM_LogVerbose    = false;
 
 
 //--- Confluence Module Inputs (M15 Baseline) ---
@@ -610,9 +626,9 @@ input int     SMC_MinConfidence = 7;
 
 //--- Journaling Inputs ---
 input group "Journaling"
-input bool    EnableJournaling      = true;
-input string  JournalFileName       = "AlfredAI_Journal.csv";
-input bool    JournalUseCommonFiles = true;
+input bool   EnableJournaling      = true;
+input string JournalFileName       = "AlfredAI_Journal.csv";
+input bool   JournalUseCommonFiles = true;
 
 // --- Decision Journaling (T026) ---
 input group "Decision Journaling"
@@ -662,14 +678,14 @@ static bool   g_rg_flag_for_bar   = false;
 
 
 // --- T028: Adaptive Spread State ---
-int      g_as_tick_ctr           = 0;
+int      g_as_tick_ctr         = 0;
 double   g_as_samples[];
-datetime g_as_forming_bar_time   = 0;
+datetime g_as_forming_bar_time = 0;
 double   g_as_bar_medians[];
-int      g_as_hist_count         = 0;
-int      g_as_hist_pos           = 0;
-bool     g_as_exceeded_for_bar   = false;
-double   g_as_cap_pts_last       = 0.0;
+int      g_as_hist_count       = 0;
+int      g_as_hist_pos         = 0;
+bool     g_as_exceeded_for_bar = false;
+double   g_as_cap_pts_last     = 0.0;
 
 // --- T030: Global Risk Guard State ---
 datetime g_rg_day_anchor_time   = 0;
@@ -746,6 +762,19 @@ static datetime   g_slc_cool_until_sell = 0;
 static int        g_slc_repeats_buy = 0;
 static int        g_slc_repeats_sell = 0;
 static datetime   g_slc_day_anchor = 0;
+
+// --- T040: Execution Analytics State ---
+struct EA_State {
+    double   ewma_slip_pts;
+    double   ewma_latency_ms;
+    int      rej_history[EA_RejWindowTrades]; // Ring buffer: 1=reject, 0=ok
+    int      rej_head;
+    int      rej_count;       // Total valid entries in history
+    ulong    last_send_ticks;
+    double   last_req_price;  // Requested price for slippage calc
+};
+static EA_State g_ea_state;
+
 
 // --- T012: Summary Counters ---
 static long g_entries       = 0;
@@ -826,7 +855,7 @@ void PrintSummary()
 bool UpdateSBCacheIfNewBar()
 {
   datetime t = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 1);
-  if(t == 0) return false;                   // no history yet
+  if(t == 0) return false;              // no history yet
   if(g_sb.valid && g_sb.closed_bar_time == t) // same bar → already cached
     return true;
 
@@ -868,8 +897,8 @@ void AAI_AppendJournal(const string line)
 {
    if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
    {
-     Print(line);
-     return;
+    Print(line);
+    return;
    }
 
    // Live/demo: write to file (optional) and also mirror to Experts log
@@ -878,8 +907,8 @@ void AAI_AppendJournal(const string line)
 
    if (name == NULL || name == "")
    {
-     Print(line);
-     return;
+    Print(line);
+    return;
    }
 
    uint flags = FILE_READ | FILE_WRITE | FILE_TXT;
@@ -887,9 +916,9 @@ void AAI_AppendJournal(const string line)
    int fh = FileOpen(name, flags);
    if (fh == INVALID_HANDLE)
    {
-     PrintFormat("[AAI_JOURNAL] open failed (%d) for '%s'", GetLastError(), name);
-     Print(line);
-     return;
+    PrintFormat("[AAI_JOURNAL] open failed (%d) for '%s'", GetLastError(), name);
+    Print(line);
+    return;
    }
 
    FileSeek(fh, 0, SEEK_END);
@@ -912,34 +941,34 @@ void AAI_LogExec(const int dir, double lots_hint = 0.0, const string run_id = "a
    // Fallback: live position
    if (PositionSelect(_Symbol))
    {
-     double pos_open = PositionGetDouble(POSITION_PRICE_OPEN);
-     double pos_sl   = PositionGetDouble(POSITION_SL);
-     double pos_tp   = PositionGetDouble(POSITION_TP);
-     double pos_vol  = PositionGetDouble(POSITION_VOLUME);
-     if (entry    <= 0.0 && pos_open > 0.0) entry    = pos_open;
-     if (sl       <= 0.0 && pos_sl   > 0.0) sl       = pos_sl;
-     if (tp       <= 0.0 && pos_tp   > 0.0) tp       = pos_tp;
-     if (lots_eff <= 0.0 && pos_vol  > 0.0) lots_eff = pos_vol;
+    double pos_open = PositionGetDouble(POSITION_PRICE_OPEN);
+    double pos_sl   = PositionGetDouble(POSITION_SL);
+    double pos_tp   = PositionGetDouble(POSITION_TP);
+    double pos_vol  = PositionGetDouble(POSITION_VOLUME);
+    if (entry    <= 0.0 && pos_open > 0.0) entry    = pos_open;
+    if (sl       <= 0.0 && pos_sl   > 0.0) sl       = pos_sl;
+    if (tp       <= 0.0 && pos_tp   > 0.0) tp       = pos_tp;
+    if (lots_eff <= 0.0 && pos_vol  > 0.0) lots_eff = pos_vol;
    }
 
    // Format to symbol precision so numbers look right
    int d = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    string execLine = StringFormat(
-     "EXEC|t=%s|sym=%s|tf=%s|dir=%s|lots=%.2f|entry=%.*f|sl=%.*f|tp=%.*f|rr=%.2f|run=%s",
-     TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-     _Symbol,
-     CurrentTfLabel(),               // your helper, e.g., "M15", "H1", ...
-     (dir > 0 ? "BUY" : "SELL"),
-     lots_eff,
-     d, entry, d, sl, d, tp,
-     Fixed_RR,
-     run_id
+    "EXEC|t=%s|sym=%s|tf=%s|dir=%s|lots=%.2f|entry=%.*f|sl=%.*f|tp=%.*f|rr=%.2f|run=%s",
+    TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+    _Symbol,
+    CurrentTfLabel(),                 // your helper, e.g., "M15", "H1", ...
+    (dir > 0 ? "BUY" : "SELL"),
+    lots_eff,
+    d, entry, d, sl, d, tp,
+    Fixed_RR,
+    run_id
    );
    // Tester path: print exactly once; no file I/O
    if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
    {
-     Print(execLine);
-     return;
+    Print(execLine);
+    return;
    }
 
    // Live/demo: file (if configured) + Experts log
@@ -980,7 +1009,7 @@ void LogPerBarStatus(int sig, double conf, int reason, double ze, int bc)
     const int readShift = 1;
     datetime closedBarTime = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, readShift);
     if (closedBarTime == g_last_per_bar_journal_time || closedBarTime == 0)
-       return;
+        return;
     g_last_per_bar_journal_time = closedBarTime;
 
     string tfStr = CurrentTfLabel();
@@ -994,41 +1023,41 @@ void LogPerBarStatus(int sig, double conf, int reason, double ze, int bc)
     int handle = FileOpen(filename, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ | FILE_ANSI, ',');
     if (handle != INVALID_HANDLE)
     {
-       if (FileSize(handle) == 0)
-          FileWriteString(handle, "t,sym,tf,sig,conf,reason,ze,bc,mode\n");
-       FileSeek(handle, 0, SEEK_END);
-       string csvRow = StringFormat(
-         "%s,%s,%s,%d,%.0f,%d,%.1f,%d,%s\n",
-         TimeToString(closedBarTime, TIME_DATE | TIME_SECONDS),
-         _Symbol,
-         tfStr,
-         sig,
-         conf,
-         reason,
-         ze,
-         bc,
-         EnumToString(ExecutionMode)
-       );
-       FileWriteString(handle, csvRow);
-       FileClose(handle);
+        if (FileSize(handle) == 0)
+            FileWriteString(handle, "t,sym,tf,sig,conf,reason,ze,bc,mode\n");
+        FileSeek(handle, 0, SEEK_END);
+        string csvRow = StringFormat(
+            "%s,%s,%s,%d,%.0f,%d,%.1f,%d,%s\n",
+            TimeToString(closedBarTime, TIME_DATE | TIME_SECONDS),
+            _Symbol,
+            tfStr,
+            sig,
+            conf,
+            reason,
+            ze,
+            bc,
+            EnumToString(ExecutionMode)
+        );
+        FileWriteString(handle, csvRow);
+        FileClose(handle);
     }
     else
     {
-       PrintFormat("[ERROR] T005: Could not open daily journal file %s", filename);
+        PrintFormat("[ERROR] T005: Could not open daily journal file %s", filename);
     }
 
     // ------------------ T004: Per-bar heartbeat ------------------
     string logLine = StringFormat(
-      "AAI|t=%s|sym=%s|tf=%s|sig=%d|conf=%.0f|reason=%d|ze=%.1f|bc=%d|mode=%s",
-      TimeToString(closedBarTime, TIME_DATE | TIME_SECONDS),
-      _Symbol,
-      tfStr,
-      sig,
-      conf,
-      reason,
-      ze,
-      bc,
-      EnumToString(ExecutionMode)
+        "AAI|t=%s|sym=%s|tf=%s|sig=%d|conf=%.0f|reason=%d|ze=%.1f|bc=%d|mode=%s",
+        TimeToString(closedBarTime, TIME_DATE | TIME_SECONDS),
+        _Symbol,
+        tfStr,
+        sig,
+        conf,
+        reason,
+        ze,
+        bc,
+        EnumToString(ExecutionMode)
     );
     Print(logLine);
     AAI_AppendJournal(logLine);
@@ -1159,17 +1188,17 @@ void AAI_ParseHourRanges(const string ranges, bool &mask[])
    string parts[];
    int n=StringSplit(ranges, ',', parts);
    for(int i=0;i<n;i++){
-     string p = parts[i];
-     AAI_Trim(p);
-     if(StringLen(p)==0) continue;
-     int dash=StringFind(p,"-");
-     if(dash<0){ int h=(int)StringToInteger(p)%24; if(h>=0) mask[h]=true; continue; }
-     int a=(int)StringToInteger(StringSubstr(p,0,dash));
-     int b=(int)StringToInteger(StringSubstr(p,dash+1));
-     a=(a%24+24)%24; b=(b%24+24)%24;
-     if(a<=b){ for(int h=a;h<=b;h++) mask[h]=true; }
-     else    { for(int h=a;h<24;h++) mask[h]=true;
-     for(int h=0;h<=b;h++) mask[h]=true; }
+    string p = parts[i];
+    AAI_Trim(p);
+    if(StringLen(p)==0) continue;
+    int dash=StringFind(p,"-");
+    if(dash<0){ int h=(int)StringToInteger(p)%24; if(h>=0) mask[h]=true; continue; }
+    int a=(int)StringToInteger(StringSubstr(p,0,dash));
+    int b=(int)StringToInteger(StringSubstr(p,dash+1));
+    a=(a%24+24)%24; b=(b%24+24)%24;
+    if(a<=b){ for(int h=a;h<=b;h++) mask[h]=true; }
+    else    { for(int h=a;h<24;h++) mask[h]=true;
+    for(int h=0;h<=b;h++) mask[h]=true; }
    }
 }
 bool AAI_HourDayAutoOK()
@@ -1189,7 +1218,7 @@ void AAI_RaiseHybridAlert(const string side, const double conf_eff, const double
    if(g_lastBarTime==g_hyb_last_alert_bar)
    {
 
-     if((TimeCurrent() - g_hyb_last_alert_ts) < HybridAlertThrottleSec) return;
+    if((TimeCurrent() - g_hyb_last_alert_ts) < HybridAlertThrottleSec) return;
    }
    g_hyb_last_alert_bar = g_lastBarTime;
    g_hyb_last_alert_ts  = TimeCurrent();
@@ -1200,13 +1229,13 @@ void AAI_RaiseHybridAlert(const string side, const double conf_eff, const double
 
    if(HybridAlertWriteIntent)
    {
-     // write a simple intent file for your existing hybrid workflow
-     string fn = StringFormat("%s\\%s_%s_%I64d.txt", g_dir_intent, _Symbol, side, (long)g_lastBarTime);
-     int h = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
-     if(h!=INVALID_HANDLE){
-        FileWrite(h, msg);
-        FileClose(h);
-     }
+    // write a simple intent file for your existing hybrid workflow
+    string fn = StringFormat("%s\\%s_%s_%I64d.txt", g_dir_intent, _Symbol, side, (long)g_lastBarTime);
+    int h = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
+    if(h!=INVALID_HANDLE){
+       FileWrite(h, msg);
+       FileClose(h);
+    }
    }
 }
 #endif
@@ -1408,6 +1437,91 @@ void RG_ResetDay()
 
 
 //+------------------------------------------------------------------+
+//| >>> T040: Execution Analytics Helpers <<<                        |
+//+------------------------------------------------------------------+
+void EA_ResetDay()
+{
+    // Reset rolling counters, keep EWMAs as they represent a longer-term profile.
+    ArrayInitialize(g_ea_state.rej_history, 0);
+    g_ea_state.rej_head = 0;
+    g_ea_state.rej_count = 0;
+}
+
+double EA_RecentRejectRate()
+{
+    if(g_ea_state.rej_count == 0) return 0.0;
+    int sum_rej = 0;
+    for(int i = 0; i < g_ea_state.rej_count; i++)
+    {
+        sum_rej += g_ea_state.rej_history[i];
+    }
+    return (double)sum_rej / (double)g_ea_state.rej_count;
+}
+
+bool OSR_IsRejectRetcode(const uint retcode)
+{
+    switch(retcode)
+    {
+        case TRADE_RETCODE_REQUOTE:
+        case TRADE_RETCODE_PRICE_OFF:
+        case TRADE_RETCODE_PRICE_CHANGED: // Not in OSR_IsRetryable, but is a form of reject
+        case TRADE_RETCODE_REJECT:
+        case 10025: // TRADE_RETCODE_NO_CONNECTION
+        case 10026: // TRADE_RETCODE_TRADE_CONTEXT_BUSY
+            return true;
+    }
+    return false;
+}
+
+void EA_LogSendResult(const uint retcode)
+{
+    if(!EA_Enable) return;
+    // Log 1 for a reject, 0 for a successful send.
+    int result = OSR_IsRejectRetcode(retcode) ? 1 : 0;
+    g_ea_state.rej_history[g_ea_state.rej_head] = result;
+    g_ea_state.rej_head = (g_ea_state.rej_head + 1) % EA_RejWindowTrades;
+    if(g_ea_state.rej_count < EA_RejWindowTrades)
+    {
+        g_ea_state.rej_count++;
+    }
+}
+
+int EA_GetAdaptiveDeviation()
+{
+    if(!EA_Enable) return InpOSR_SlipPtsInitial;
+
+    double dev_from_slip   = MathCeil(g_ea_state.ewma_slip_pts * EA_DevVsSlipMul);
+    double dev_from_spread = MathCeil(CurrentSpreadPoints() * EA_DevVsSpreadFrac);
+    double dev = MathMax(EA_BaseDeviationPts, MathMax(dev_from_slip, dev_from_spread));
+
+    if(EA_RecentRejectRate() > 0.20) // Threshold for "elevated" rejects
+    {
+        dev += EA_RejBumpPts;
+    }
+    if(g_ea_state.ewma_latency_ms > EA_LatBumpMs)
+    {
+        dev += EA_LatBumpPts;
+    }
+
+    int final_dev = (int)MathMax(EA_MinDeviationPts, MathMin(EA_MaxDeviationPts, dev));
+
+    if(EA_LogVerbose)
+    {
+        static datetime last_log_time = 0;
+        if(g_sb.valid && g_sb.closed_bar_time != last_log_time)
+        {
+            PrintFormat("[EA] dev=%dpts slipEWMA=%.1f latEWMA=%.0fms rejRate=%.2f spread=%d",
+                        final_dev, g_ea_state.ewma_slip_pts, g_ea_state.ewma_latency_ms,
+                        EA_RecentRejectRate(), CurrentSpreadPoints());
+            last_log_time = g_sb.closed_bar_time;
+        }
+    }
+
+    return final_dev;
+}
+
+
+//+------------------------------------------------------------------+
 //| >>> T031: Order Send Robustness Helpers <<<                      |
 //+------------------------------------------------------------------+
 double NormalizeLots(double lots)
@@ -1491,8 +1605,8 @@ bool OSR_SendMarket(const int direction,
                     MqlTradeResult &lastRes)
 {
   if(!InpOSR_Enable){
-    // Single attempt using CTrade
-    trade.SetDeviationInPoints(InpOSR_SlipPtsInitial);
+    // Single attempt using CTrade with adaptive deviation
+    trade.SetDeviationInPoints(EA_GetAdaptiveDeviation());
     bool order_sent = (direction > 0)
                       ? trade.Buy(lots, _Symbol, 0.0, sl_io, tp_io, g_last_comment)
                       : trade.Sell(lots, _Symbol, 0.0, sl_io, tp_io, g_last_comment);
@@ -1501,7 +1615,7 @@ bool OSR_SendMarket(const int direction,
   }
 
   int retries = MathMax(0, InpOSR_MaxRetries);
-  int deviation = MathMax(0, InpOSR_SlipPtsInitial);
+  int deviation = EA_GetAdaptiveDeviation(); // T040: Use adaptive deviation
 
   for(int attempt=0; attempt<=retries; ++attempt)
   {
@@ -1869,7 +1983,7 @@ void TRL_OnTick()
                                              : SymbolInfoDouble(_Symbol, SYMBOL_ASK)));
 
   TRL_State *st = TRL_GetState(_Symbol, true);
-  st.direction   = dir;
+  st.direction    = dir;
   if(st.entry_price <= 0.0) st.entry_price = px_op;
   if(st.entry_sl_pts <= 0.0 && cur_sl>0.0) st.entry_sl_pts = MathAbs(px_op - cur_sl)/_Point;
 
@@ -2050,10 +2164,10 @@ void PT_OnTick()
 
     if(lots_to_close <= 0.0)
     {
-       // This can happen if a previous step already closed more than this step's cumulative %,
-       // or if remaining volume is zero. Mark as done and continue.
-       if(steps[i].id==1) st.pt1_done = true; else if(steps[i].id==2) st.pt2_done = true; else st.pt3_done = true;
-       continue;
+        // This can happen if a previous step already closed more than this step's cumulative %,
+        // or if remaining volume is zero. Mark as done and continue.
+        if(steps[i].id==1) st.pt1_done = true; else if(steps[i].id==2) st.pt2_done = true; else st.pt3_done = true;
+        continue;
     }
 
     // Reduce net position with opposite-side market (OSR manages retries/slippage)
@@ -2066,8 +2180,12 @@ void PT_OnTick()
       if(InpPT_LogVerbose) PrintFormat("[PT] step %d send fail ret=%u lots=%.2f", i+1, tRes.retcode, lots_to_close);
       // T037: Log failure for watchdog
       PHW_LogFailure(tRes.retcode);
+      // T040: Log execution result
+      EA_LogSendResult(tRes.retcode);
       return; // keep conditions; try again next eligible tick
     }
+    // T040: Log execution result
+    EA_LogSendResult(tRes.retcode);
 
     // Update state
     double filled = (tRes.volume > 0.0 ? tRes.volume : lots_to_close);
@@ -2155,6 +2273,15 @@ g_slc_count_buy = 0; g_slc_count_sell = 0;
 g_slc_cool_until_buy = 0; g_slc_cool_until_sell = 0;
 g_slc_repeats_buy = 0; g_slc_repeats_sell = 0;
 g_slc_day_anchor = 0;
+
+// --- T040: Init Execution Analytics state ---
+g_ea_state.ewma_slip_pts = 0.0;
+g_ea_state.ewma_latency_ms = 0.0;
+ArrayInitialize(g_ea_state.rej_history, 0);
+g_ea_state.rej_head = 0;
+g_ea_state.rej_count = 0;
+g_ea_state.last_send_ticks = 0;
+g_ea_state.last_req_price = 0.0;
 
 
 // --- TICKET #2: Create the single, centralized SignalBrain handle ---
@@ -2505,27 +2632,27 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          datetime deal_time = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
          if(deal_time >= g_rg_day_anchor_time)
          {
-           double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
-                           HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
-                           HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+          double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
+                          HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
+                          HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
 
-           g_rg_day_realized_pl += profit;
-           if(profit < 0) g_rg_consec_losses++; else g_rg_consec_losses = 0;
+          g_rg_day_realized_pl += profit;
+          if(profit < 0) g_rg_consec_losses++; else g_rg_consec_losses = 0;
 
-           if((ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON) == DEAL_REASON_SL)
-           {
-              g_rg_day_sl_hits++;
-           }
+          if((ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON) == DEAL_REASON_SL)
+          {
+            g_rg_day_sl_hits++;
+          }
          }
          // T035: Delete Trailing State on close
          for(int i = g_trl_states.Total() - 1; i >= 0; i--)
          {
-           TRL_State *s = (TRL_State*)g_trl_states.At(i);
-           if(s && s.symbol == HistoryDealGetString(trans.deal, DEAL_SYMBOL))
-           {
-              g_trl_states.Delete(i);
-              delete s;
-           }
+          TRL_State *s = (TRL_State*)g_trl_states.At(i);
+          if(s && s.symbol == HistoryDealGetString(trans.deal, DEAL_SYMBOL))
+          {
+            g_trl_states.Delete(i);
+            delete s;
+          }
          }
       }
 
@@ -2534,15 +2661,31 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       {
          if(AAI_last_in_deal != trans.deal)
          {
-           AAI_last_in_deal = trans.deal;
-           int  dtyp = (int)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-           int  dir  = (dtyp == DEAL_TYPE_BUY ? +1 : -1);
-           double lots = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
-           AAI_LogExec(dir, lots, "tx");
+          AAI_last_in_deal = trans.deal;
+          int  dtyp = (int)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+          int  dir  = (dtyp == DEAL_TYPE_BUY ? +1 : -1);
+          double lots = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+          AAI_LogExec(dir, lots, "tx");
 
-           // Remember last IN time (for duration calc)
-           AAI_last_in_pos_id = (long)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-           AAI_last_in_time   = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+          // T040: Update execution analytics on fill
+          if(EA_Enable && trans.symbol == _Symbol)
+          {
+              ulong lat = (g_ea_state.last_send_ticks > 0) ? GetTickCount64() - g_ea_state.last_send_ticks : 0;
+              double deal_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+              double slip_pts = (g_ea_state.last_req_price > 0) ? MathAbs((deal_price - g_ea_state.last_req_price) / _Point) : 0;
+
+              const double alpha = 2.0 / (EA_EwmaTrades + 1.0);
+              g_ea_state.ewma_slip_pts = (1.0 - alpha) * g_ea_state.ewma_slip_pts + alpha * slip_pts;
+              g_ea_state.ewma_latency_ms = (1.0 - alpha) * g_ea_state.ewma_latency_ms + alpha * lat;
+
+              // Reset trackers for next send
+              g_ea_state.last_send_ticks = 0;
+              g_ea_state.last_req_price = 0.0;
+          }
+
+          // Remember last IN time (for duration calc)
+          AAI_last_in_pos_id = (long)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+          AAI_last_in_time   = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
          }
       }
       // Metrics on exits (DEAL_ENTRY_OUT): accumulate closed-trade stats
@@ -2550,48 +2693,48 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       {
          if(AAI_last_out_deal != trans.deal)
          {
-           AAI_last_out_deal = trans.deal;
-           double net = AAI_NetDealPL(trans.deal);
-           AAI_trades++;
-           if(net > 0.0) { AAI_wins++; AAI_win_count++; AAI_gross_profit += net; AAI_sum_win += net; }
-           else if(net < 0.0) { AAI_losses++; AAI_loss_count++;
-           AAI_gross_loss += -net; AAI_sum_loss_abs += -net; }
+          AAI_last_out_deal = trans.deal;
+          double net = AAI_NetDealPL(trans.deal);
+          AAI_trades++;
+          if(net > 0.0) { AAI_wins++; AAI_win_count++; AAI_gross_profit += net; AAI_sum_win += net; }
+          else if(net < 0.0) { AAI_losses++; AAI_loss_count++;
+          AAI_gross_loss += -net; AAI_sum_loss_abs += -net; }
 
-           // Closed-trade curve & drawdown
-           AAI_UpdateCurve(net);
-           
-           // --- T038: Update ECF EWMA ---
-           const double alpha = 2.0 / (ECF_EMA_Trades + 1.0);
-           g_ecf_ewma = (1.0 - alpha) * g_ecf_ewma + alpha * net;
-           
-           // Duration estimate (seconds) using last known IN time
-           datetime out_time = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
-           if(AAI_last_in_time > 0 && out_time >= AAI_last_in_time)
-           {
-               AAI_dur_sum_sec += (double)(out_time - AAI_last_in_time);
-               AAI_dur_count++;
-           }
+          // Closed-trade curve & drawdown
+          AAI_UpdateCurve(net);
+          
+          // --- T038: Update ECF EWMA ---
+          const double alpha = 2.0 / (ECF_EMA_Trades + 1.0);
+          g_ecf_ewma = (1.0 - alpha) * g_ecf_ewma + alpha * net;
+          
+          // Duration estimate (seconds) using last known IN time
+          datetime out_time = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+          if(AAI_last_in_time > 0 && out_time >= AAI_last_in_time)
+          {
+              AAI_dur_sum_sec += (double)(out_time - AAI_last_in_time);
+              AAI_dur_count++;
+          }
 
-           // Optional: duration estimate using last IN time if position ids align
-           long pos_id = (long)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-           // We keep a simple heuristic: if position id changed since last IN, we try to back-scan one IN for same pos_id
-           if(pos_id != AAI_last_in_pos_id)
-           {
-              // best-effort backscan for nearest IN of same position
-              int total = HistoryDealsTotal();
-              datetime nearest_in = 0;
-              for(int i = total-1; i >= 0 && i >= total-200; --i) // scan recent deals window
-              {
-                ulong tk = (ulong)HistoryDealGetTicket(i);
-                if(HistoryDealGetInteger(tk, DEAL_POSITION_ID) == pos_id &&
-                   HistoryDealGetInteger(tk, DEAL_ENTRY) == DEAL_ENTRY_IN)
-                {
-                  nearest_in = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
-                  break;
-                }
-              }
-              if(nearest_in > 0) AAI_last_in_time = nearest_in;
-           }
+          // Optional: duration estimate using last IN time if position ids align
+          long pos_id = (long)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+          // We keep a simple heuristic: if position id changed since last IN, we try to back-scan one IN for same pos_id
+          if(pos_id != AAI_last_in_pos_id)
+          {
+            // best-effort backscan for nearest IN of same position
+            int total = HistoryDealsTotal();
+            datetime nearest_in = 0;
+            for(int i = total-1; i >= 0 && i >= total-200; --i) // scan recent deals window
+            {
+             ulong tk = (ulong)HistoryDealGetTicket(i);
+             if(HistoryDealGetInteger(tk, DEAL_POSITION_ID) == pos_id &&
+                HistoryDealGetInteger(tk, DEAL_ENTRY) == DEAL_ENTRY_IN)
+             {
+               nearest_in = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
+               break;
+             }
+            }
+            if(nearest_in > 0) AAI_last_in_time = nearest_in;
+          }
          }
       }
     }
@@ -2606,8 +2749,8 @@ if(trans.type == TRADE_TRANSACTION_DEAL_ADD && HistoryDealSelect(trans.deal))
          ulong pos_id = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
          if(!PositionSelectByTicket(pos_id) && !IsPositionLogged(pos_id))
          {
-           JournalClosedPosition(pos_id);
-           AddToLoggedList(pos_id);
+          JournalClosedPosition(pos_id);
+          AddToLoggedList(pos_id);
          }
       }
     }
@@ -2695,9 +2838,9 @@ void OnTick()
 
    if(PositionSelect(_Symbol))
    {
-     MqlDateTime dt;
-     TimeToStruct(TimeCurrent(), dt);
-     ManageOpenPositions(dt, false);
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+    ManageOpenPositions(dt, false);
    }
 
    // TICKET T021: Use the cache helper
@@ -2942,7 +3085,11 @@ bool GateRiskGuard(double &conf_io, string &reason_id)
   anchor_dt.sec = 0;
   datetime current_anchor = StructToTime(anchor_dt);
   if(current_anchor > TimeCurrent()) current_anchor -= 86400;
-  if(current_anchor != g_rg_day_anchor_time) RG_ResetDay();
+  if(current_anchor != g_rg_day_anchor_time)
+  {
+      RG_ResetDay();
+      EA_ResetDay(); // T040: Also reset execution analytics counters
+  }
 
 
   // If currently blocked and block time not expired, block
@@ -3150,7 +3297,7 @@ if(g_sb.closed_bar_time != g_last_overext_dec_sigbar)
     g_overext_wait--;
 
     if(g_overext_wait <= 0)
-       return true;
+      return true;
 
     g_last_overext_dec_sigbar = g_sb.closed_bar_time;
 }
@@ -3369,12 +3516,12 @@ bool GateInterMarket(const int direction, double &conf_io, string &reason_id)
   {
     g_imc_flag_for_bar = true;
     if(InpIMC_Mode == IMC_REQUIRED){
-      reason_id = "imc";      // inter-market confirmation
+      reason_id = "imc";       // inter-market confirmation
       if(g_stamp_imc != g_sb.closed_bar_time) { g_blk_imc++; g_stamp_imc = g_sb.closed_bar_time; }
-      return false;           // BLOCK
+      return false;            // BLOCK
     } else {
       conf_io = MathMax(0.0, conf_io - (double)InpIMC_PrefPenalty);
-      return true;            // allow with penalty
+      return true;             // allow with penalty
     }
   }
 
@@ -3722,8 +3869,8 @@ bool TryOpenPosition(int signal, double conf_eff, int reason_code, double ze_str
    // --- T033: Auto-adjust SL/TP to satisfy broker min-stops & RR; re-scale lots ---
    if(!SLTA_AdjustAndRescale(signal, entryPrice, slPrice, tpPrice, lots_to_trade, (int)conf_eff))
    {
-     if(InpSLTA_LogVerbose) Print("[SLTA_CANCEL] Could not meet broker min-stops / RR constraints within bounds.");
-     return false; // Cancel this attempt cleanly
+    if(InpSLTA_LogVerbose) Print("[SLTA_CANCEL] Could not meet broker min-stops / RR constraints within bounds.");
+    return false; // Cancel this attempt cleanly
    }
 
    g_last_comment = StringFormat("AAI|%.1f|%d|%d|%.1f|%.5f|%.5f|%.1f",
@@ -3741,8 +3888,18 @@ bool TryOpenPosition(int signal, double conf_eff, int reason_code, double ze_str
             (double)CurrentSpreadPoints(),
             lots_to_trade, sl_dist / point, (tpPrice>0?MathAbs(tpPrice-entryPrice)/point:0), rr_calc, entry_mode);
 
+   // T040: Capture pre-send state
+   if(EA_Enable)
+   {
+       g_ea_state.last_send_ticks = GetTickCount64();
+       g_ea_state.last_req_price = entryPrice;
+   }
+
    MqlTradeResult tRes;
    bool sent = OSR_SendMarket(signal, lots_to_trade, entryPrice, slPrice, tpPrice, tRes);
+
+   // T040: Log execution result
+   EA_LogSendResult(tRes.retcode);
 
    if(!sent){
      PrintFormat("[AAI_SENDFAIL] retcode=%u lots=%.2f dir=%d", tRes.retcode, lots_to_trade, signal);
@@ -3849,12 +4006,12 @@ bool AAI_ApplyBEAndTrail(const ENUM_POSITION_TYPE side, const double entry_price
 
    if(Partial_R_multiple > 0 && move_pips >= initial_risk_pips * Partial_R_multiple)
    {
-     double be_target = entry_price + (is_long ? +1 : -1) * BE_Offset_Points * _Point;
-     if( (is_long && (sl_io < be_target)) || (!is_long && (sl_io > be_target)) )
-     {
-       sl_io = be_target;
-       changed = true;
-     }
+    double be_target = entry_price + (is_long ? +1 : -1) * BE_Offset_Points * _Point;
+    if( (is_long && (sl_io < be_target)) || (!is_long && (sl_io > be_target)) )
+    {
+      sl_io = be_target;
+      changed = true;
+    }
    }
 
    if(InpTRL_Enable && InpTRL_Mode != TRL_OFF) // Defer trailing to TRL_OnTick
@@ -3888,27 +4045,27 @@ void HandlePartialProfits()
    (SymbolInfoDouble(symbolName, SYMBOL_BID) - open_price) / PipSize() : (open_price - SymbolInfoDouble(symbolName, SYMBOL_ASK)) / PipSize();
    if(current_profit_pips >= initial_risk_pips * Partial_R_multiple)
    {
-     ulong ticket = PositionGetInteger(POSITION_TICKET);
-     double volume = PositionGetDouble(POSITION_VOLUME);
-     double close_volume = volume * (Partial_Pct / 100.0);
-     double lot_step = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
-     close_volume = round(close_volume / lot_step) * lot_step;
-     if(close_volume < lot_step) return;
-     if(trade.PositionClosePartial(ticket, close_volume))
-     {
-       double be_sl_price = open_price + ((type == POSITION_TYPE_BUY) ? BE_Offset_Points * _Point : -BE_Offset_Points * _Point);
-       if(trade.PositionModify(ticket, be_sl_price, PositionGetDouble(POSITION_TP)))
-       {
-         MqlTradeRequest req;
-         MqlTradeResult res; ZeroMemory(req);
-         req.action = TRADE_ACTION_MODIFY; req.position = ticket;
-         req.sl = be_sl_price; req.tp = PositionGetDouble(POSITION_TP);
-         req.comment = comment + "|P1";
-         if(!OrderSend(req, res)) PrintFormat("%s Failed to send position modify request. Error: %d", EVT_PARTIAL, GetLastError());
-       }
-       else { PHW_LogFailure(trade.ResultRetcode()); } // T037
-     }
-     else { PHW_LogFailure(trade.ResultRetcode()); } // T037
+    ulong ticket = PositionGetInteger(POSITION_TICKET);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double close_volume = volume * (Partial_Pct / 100.0);
+    double lot_step = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
+    close_volume = round(close_volume / lot_step) * lot_step;
+    if(close_volume < lot_step) return;
+    if(trade.PositionClosePartial(ticket, close_volume))
+    {
+      double be_sl_price = open_price + ((type == POSITION_TYPE_BUY) ? BE_Offset_Points * _Point : -BE_Offset_Points * _Point);
+      if(trade.PositionModify(ticket, be_sl_price, PositionGetDouble(POSITION_TP)))
+      {
+       MqlTradeRequest req;
+       MqlTradeResult res; ZeroMemory(req);
+       req.action = TRADE_ACTION_MODIFY; req.position = ticket;
+       req.sl = be_sl_price; req.tp = PositionGetDouble(POSITION_TP);
+       req.comment = comment + "|P1";
+       if(!OrderSend(req, res)) PrintFormat("%s Failed to send position modify request. Error: %d", EVT_PARTIAL, GetLastError());
+      }
+      else { PHW_LogFailure(trade.ResultRetcode()); } // T037
+    }
+    else { PHW_LogFailure(trade.ResultRetcode()); } // T037
    }
 }
 
@@ -3941,19 +4098,19 @@ void JournalClosedPosition(ulong position_id)
    // --- Find the first opening deal and last closing deal for the position ---
    for(int i=0; i < HistoryDealsTotal(); i++)
    {
-     ulong deal_ticket = HistoryDealGetTicket(i);
-     if(HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID) == position_id)
-     {
-         if(HistoryDealGetInteger(deal_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
-         {
-             if(first_in_ticket == 0) first_in_ticket = deal_ticket;
-         }
-         else
-         {
-             last_out_ticket = deal_ticket;
-         }
-         total_profit += HistoryDealGetDouble(deal_ticket, DEAL_PROFIT) + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION) + HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
-     }
+    ulong deal_ticket = HistoryDealGetTicket(i);
+    if(HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID) == position_id)
+    {
+        if(HistoryDealGetInteger(deal_ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+        {
+            if(first_in_ticket == 0) first_in_ticket = deal_ticket;
+        }
+        else
+        {
+            last_out_ticket = deal_ticket;
+        }
+        total_profit += HistoryDealGetDouble(deal_ticket, DEAL_PROFIT) + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION) + HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+    }
    }
 
    if(first_in_ticket == 0) return; // No opening deal found, cannot journal
@@ -3994,39 +4151,39 @@ void JournalClosedPosition(ulong position_id)
    int file_handle = FileOpen(JournalFileName, FILE_READ|FILE_WRITE|FILE_CSV|(JournalUseCommonFiles ? FILE_COMMON : 0), ';');
    if(file_handle != INVALID_HANDLE)
    {
-     if(FileSize(file_handle) == 0)
-     {
-         FileWriteString(file_handle, "TimeLocal;TimeServer;Symbol;TF;Dir;Entry;SL;TP;SL_pips;TP_pips;R;Confidence;ZE_Strength;SMC_Score;ReasonCode;ReasonText;Magic;Ticket;Comment\n");
-     }
-     FileSeek(file_handle, 0, SEEK_END);
+    if(FileSize(file_handle) == 0)
+    {
+        FileWriteString(file_handle, "TimeLocal;TimeServer;Symbol;TF;Dir;Entry;SL;TP;SL_pips;TP_pips;R;Confidence;ZE_Strength;SMC_Score;ReasonCode;ReasonText;Magic;Ticket;Comment\n");
+    }
+    FileSeek(file_handle, 0, SEEK_END);
 
-     string line = StringFormat("%s;%s;%s;%s;%s;%.5f;%.5f;%.5f;%.1f;%.1f;%.2f;%.0f;%.0f;%.0f;%d;%s;%d;%I64u;%s\n",
-                                TimeToString(TimeLocal(), TIME_DATE|TIME_SECONDS),
-                                TimeToString(time_close_server, TIME_DATE|TIME_SECONDS),
-                                symbol,
-                                EnumToString(SignalTimeframe),
-                                dir,
-                                entry_price,
-                                sl_price_initial,
-                                tp_price_initial,
-                                sl_pips,
-                                tp_pips,
-                                rr,
-                                conf_eff,
-                                ze_strength,
-                                smc_score,
-                                reason_code,
-                                reason_text,
-                                (int)magic,
-                                position_id, // Using Position ID as the unique ticket/identifier for the trade
-                                comment_initial
-                               );
-     FileWriteString(file_handle, line);
-     FileClose(file_handle);
+    string line = StringFormat("%s;%s;%s;%s;%s;%.5f;%.5f;%.5f;%.1f;%.1f;%.2f;%.0f;%.0f;%.0f;%d;%s;%d;%I64u;%s\n",
+                               TimeToString(TimeLocal(), TIME_DATE|TIME_SECONDS),
+                               TimeToString(time_close_server, TIME_DATE|TIME_SECONDS),
+                               symbol,
+                               EnumToString(SignalTimeframe),
+                               dir,
+                               entry_price,
+                               sl_price_initial,
+                               tp_price_initial,
+                               sl_pips,
+                               tp_pips,
+                               rr,
+                               conf_eff,
+                               ze_strength,
+                               smc_score,
+                               reason_code,
+                               reason_text,
+                               (int)magic,
+                               position_id, // Using Position ID as the unique ticket/identifier for the trade
+                               comment_initial
+                              );
+    FileWriteString(file_handle, line);
+    FileClose(file_handle);
    }
    else
    {
-     PrintFormat("%s Failed to open journal file '%s'. Error: %d", EVT_JOURNAL, JournalFileName, GetLastError());
+    PrintFormat("%s Failed to open journal file '%s'. Error: %d", EVT_JOURNAL, JournalFileName, GetLastError());
    }
 }
 
