@@ -18,7 +18,7 @@ double   AAI_max_dd = 0.0;
 
 long     AAI_last_in_pos_id = -1;
 datetime AAI_last_in_time = 0;
-ulong    AAI_last_out_deal = 0;      // dedupe out deals
+ulong    AAI_last_out_deal = 0;     // dedupe out deals
 ulong    AAI_last_in_deal  = 0;
 // (reuses exec hook dedupe if present)
 
@@ -48,7 +48,7 @@ int    AAI_dur_count   = 0;
 // ==================== /AAI METRICS ======================
 //+------------------------------------------------------------------+
 //| AAI_EA_Trade_Manager.mq5                                         |
-//|                           v5.12 - Telemetry v2                   |
+//|                                   v5.12 - Telemetry v2           |
 //|                                                                  |
 //| (Consumes all data from the refactored AAI_Indicator_SignalBrain)|
 //|                                                                  |
@@ -152,33 +152,40 @@ const bool   EA_LogVerbose       = false;
 // --- T041: Market State Model (MSM) Constants ---
 // Window sizes (compile-time)
 enum {
-    MSM_ATR_Period        = 14,
-    MSM_ADX_Period        = 14,
-    MSM_EMA_Fast          = 20,
-    MSM_EMA_Slow          = 50,
-    MSM_ATR_PctlWindow    = 200,    // ATR history for percentile
-    MSM_Brk_Period        = 20      // Donchian breakout lookback (excl. current bar)
+   MSM_ATR_Period       = 14,
+   MSM_ADX_Period       = 14,
+   MSM_EMA_Fast         = 20,
+   MSM_EMA_Slow         = 50,
+   MSM_ATR_PctlWindow   = 200,    // ATR history for percentile
+   MSM_Brk_Period       = 20      // Donchian breakout lookback (excl. current bar)
 };
 // Tunables
-const bool   MSM_Enable            = true;
-const double MSM_PctlVolatile      = 0.70;  // ATR percentile ≥ 70% → volatile
-const double MSM_PctlQuiet         = 0.30;  // ATR percentile ≤ 30% → quiet
-const double MSM_ADX_TrendThresh   = 22.0;  // ADX ≥ 22 → trending
-const double MSM_ADX_RangeThresh   = 18.0;  // ADX ≤ 18 → ranging bias
-const double MSM_MaxUpMult         = 1.08;  // cap boost
-const double MSM_MaxDnMult         = 0.90;  // cap penalty
-const double MSM_MisalignedTrend   = 0.92;  // penalty when signal vs trend disagree
-const double MSM_RangePenalty      = 0.96;  // small mean-reversion bias
-const double MSM_VolatPenalty      = 0.93;  // higher noise → caution
-const double MSM_QuietPenalty      = 0.96;  // low ATR → slip/fill risk
-const bool   MSM_LogVerbose        = false; // throttle to ≤1/bar
+const bool   MSM_Enable          = true;
+const double MSM_PctlVolatile    = 0.70;  // ATR percentile >= 70% -> volatile
+const double MSM_PctlQuiet       = 0.30;  // ATR percentile <= 30% -> quiet
+const double MSM_ADX_TrendThresh = 22.0;  // ADX >= 22 -> trending
+const double MSM_ADX_RangeThresh = 18.0;  // ADX <= 18 -> ranging bias
+const double MSM_MaxUpMult       = 1.08;  // cap boost
+const double MSM_MaxDnMult       = 0.90;  // cap penalty
+const double MSM_MisalignedTrend = 0.92;  // penalty when signal vs trend disagree
+const double MSM_RangePenalty    = 0.96;  // small mean-reversion bias
+const double MSM_VolatPenalty    = 0.93;  // higher noise -> caution
+const double MSM_QuietPenalty    = 0.96;  // low ATR -> slip/fill risk
+const bool   MSM_LogVerbose      = false; // throttle to <=1/bar
 
 // --- T042: Telemetry v2 Constants ---
 enum { TEL_STRLEN = 256 };
-const bool   TEL_Enable        = true;
-const int    TEL_EmitEveryN    = 0;
-const bool   TEL_LogVerbose    = false;
-const string TEL_Prefix        = "TEL";
+const bool   TEL_Enable      = true;
+const int    TEL_EmitEveryN  = 0;
+const bool   TEL_LogVerbose  = false;
+const string TEL_Prefix      = "TEL";
+
+// --- T043: Backtest/Live Parity Harness (PTH) Constants ---
+enum { PTH_STRLEN = 256, PTH_RING = 64 };
+const bool   PTH_Enable      = true;   // harness active internally; printing still gated by EveryN
+const int    PTH_EmitEveryN  = 0;      // 0 = no PAR prints; N>0 => print every N closed bars
+const bool   PTH_LogVerbose  = false;  // add a few extra fields when true
+const string PTH_Prefix      = "PAR";  // log tag
 
 // --- EA Fixes (Part B): Indicator Path Helper ---
 #define AAI_IND_PREFIX "AlfredAI\\"
@@ -212,12 +219,19 @@ const string HUD_OBJECT_NAME = "AAI_HUD";
 
 // TICKET #2: New defensive read helper
 inline bool Read1(int h,int b,int shift,double &out,const string id){
-    double v[1]; if(CopyBuffer(h,b,shift,1,v)==1){ out=v[0]; return true; }
-    static datetime lastWarn=0; datetime bt=iTime(_Symbol,_Period,shift);
-    if(bt!=lastWarn){ PrintFormat("[%s_READFAIL] t=%s",id,TimeToString(bt,TIME_DATE|TIME_SECONDS)); lastWarn=bt; }
-    return false;
+   double v[1]; if(CopyBuffer(h,b,shift,1,v)==1){ out=v[0]; return true; }
+   static datetime lastWarn=0; datetime bt=iTime(_Symbol,_Period,shift);
+   if(bt!=lastWarn){ PrintFormat("[%s_READFAIL] t=%s",id,TimeToString(bt,TIME_DATE|TIME_SECONDS)); lastWarn=bt; }
+   return false;
 }
 
+// T043: FNV-1a 32-bit string hasher
+inline uint FNV1a32(const string s)
+{
+    uint h = 2166136261;
+    for(int i=0;i<StringLen(s);++i){ h ^= (uchar)s[i]; h *= 16777619; }
+    return h;
+}
 
 // Fallback for printing ZE gate nicely
 string ZE_GateToStr(int gate)
@@ -254,7 +268,7 @@ inline string TfLabel(ENUM_TIMEFRAMES tf) {
    // e.g., "PERIOD_M15"
    int p = StringFind(s, "PERIOD_");
    return (p == 0 ? StringSubstr(s, 7) : s);
-   // → "M15"
+   // -> "M15"
 }
 
 inline string CurrentTfLabel() {
@@ -380,8 +394,8 @@ input int    SB_SMC_BOS_Lookback = 50;
 input group "Risk Management"
 input int    SL_Buffer_Points  = 10;
 
-// --- Confidence → Risk Curve (T032) ---
-input group "Confidence → Risk Curve"
+// --- Confidence -> Risk Curve (T032) ---
+input group "Confidence -> Risk Curve"
 input bool          InpCRC_Enable        = true;
 input ENUM_CRC_Mode InpCRC_Mode          = CRC_LINEAR;
 input double        InpCRC_MinRiskPct    = 0.50;
@@ -506,7 +520,7 @@ input bool        InpPT_LogVerbose      = false;
 
 //--- Entry Filter Inputs (M15 Baseline) ---
 input group "Entry Filters"
-input int           MinConfidence        = 50;
+input int               MinConfidence        = 50;
 // --- T011: Over-extension Inputs ---
 input group "Over-extension Guard"
 input ENUM_OVEREXT_MODE OverExtMode = WaitForBand;
@@ -560,15 +574,15 @@ input int          InpSP_PrefPenalty         = 5;
 // --- Adaptive Spread (T028) ---
 input group "Adaptive Spread"
 enum ENUM_AS_Mode { AS_OFF=0, AS_REQUIRED=1, AS_PREFERRED=2 };
-input bool          InpAS_Enable          = true;
-input ENUM_AS_Mode  InpAS_Mode            = AS_REQUIRED;
-input int           InpAS_SampleEveryNTicks = 5;
-input int           InpAS_SamplesPerBarMax  = 400;
-input int           InpAS_WindowBars      = 20;
-input double        InpAS_SafetyPct       = 0.10;
-input int           InpAS_SafetyPts       = 2;
-input bool          InpAS_ClampToFixedMax = true;
-input int           InpAS_PrefPenalty     = 2;
+input bool         InpAS_Enable          = true;
+input ENUM_AS_Mode InpAS_Mode            = AS_REQUIRED;
+input int          InpAS_SampleEveryNTicks = 5;
+input int          InpAS_SamplesPerBarMax  = 400;
+input int          InpAS_WindowBars      = 20;
+input double       InpAS_SafetyPct       = 0.10;
+input int          InpAS_SafetyPts       = 2;
+input bool         InpAS_ClampToFixedMax = true;
+input int          InpAS_PrefPenalty     = 2;
 
 // --- Inter-Market Confirmation (T029) ---
 input group "Inter-Market Confirmation"
@@ -597,17 +611,17 @@ input int           InpIMC_PrefPenalty    = 4;
 // --- Global Risk Guard (T030) ---
 input group "Global Risk Guard"
 enum ENUM_RG_Mode { RG_OFF=0, RG_REQUIRED=1, RG_PREFERRED=2 };
-input bool          InpRG_Enable            = true;
-input ENUM_RG_Mode  InpRG_Mode              = RG_REQUIRED;
-input int           InpRG_ResetHourServer   = 0;
-input double        InpRG_MaxDailyLossPct   = 2.0;
-input double        InpRG_MaxDailyLossMoney = 0.0;
-input int           InpRG_MaxSLHits         = 0;
-input int           InpRG_MaxConsecLosses   = 3;
+input bool         InpRG_Enable            = true;
+input ENUM_RG_Mode InpRG_Mode              = RG_REQUIRED;
+input int          InpRG_ResetHourServer   = 0;
+input double       InpRG_MaxDailyLossPct   = 2.0;
+input double       InpRG_MaxDailyLossMoney = 0.0;
+input int          InpRG_MaxSLHits         = 0;
+input int          InpRG_MaxConsecLosses   = 3;
 enum ENUM_RG_BlockUntil { RG_BLOCK_TIL_END_OF_DAY=0, RG_BLOCK_FOR_HOURS=1 };
 input ENUM_RG_BlockUntil InpRG_BlockUntil   = RG_BLOCK_TIL_END_OF_DAY;
-input int           InpRG_BlockHours        = 4;
-input int           InpRG_PrefPenalty       = 5;
+input int          InpRG_BlockHours        = 4;
+input int          InpRG_PrefPenalty       = 5;
 
 // --- Order Send Robustness & Retry (T031) ---
 input group "Order Send Robustness & Retry"
@@ -625,20 +639,20 @@ input bool         InpOSR_LogVerbose     = false;
 
 // --- SL/TP Safety & MinStops Auto-Adjust (T033) ---
 input group "SL/TP Safety & MinStops Auto-Adjust"
-input bool          InpSLTA_Enable         = true;
+input bool           InpSLTA_Enable        = true;
 input ENUM_SLTA_Mode InpSLTA_Mode          = SLTA_ADJUST_TP_KEEP_RR;
-input double        InpSLTA_TargetRR       = 1.50;
-input double        InpSLTA_MinRR          = 1.20;
-input int           InpSLTA_ExtraBufferPts = 2;
-input double        InpSLTA_MaxWidenFrac   = 0.50;
-input int           InpSLTA_MaxTPPts       = 0;
-input bool          InpSLTA_StrictCancel   = true;
-input bool          InpSLTA_LogVerbose     = false;
+input double         InpSLTA_TargetRR      = 1.50;
+input double         InpSLTA_MinRR         = 1.20;
+input int            InpSLTA_ExtraBufferPts = 2;
+input double         InpSLTA_MaxWidenFrac  = 0.50;
+input int            InpSLTA_MaxTPPts      = 0;
+input bool           InpSLTA_StrictCancel  = true;
+input bool           InpSLTA_LogVerbose    = false;
 
 // --- Post-Fill Harmonizer (T034) ---
 input group "Post-Fill Harmonizer"
 input bool         InpHM_Enable        = true;
-input ENUM_HM_Mode InpHM_Mode        = HM_DELAYED_RETRY;
+input ENUM_HM_Mode InpHM_Mode          = HM_DELAYED_RETRY;
 input int          InpHM_DelayMs       = 300;
 input int          InpHM_MaxRetries    = 3;
 input int          InpHM_BackoffMs     = 400;
@@ -655,7 +669,7 @@ input int                ZE_MinStrength    = 4;
 
 enum SMCMode { SMC_OFF=0, SMC_PREFERRED=1, SMC_REQUIRED=2 };
 input SMCMode SMC_Mode = SMC_REQUIRED;
-input int     SMC_MinConfidence = 7;
+input int   SMC_MinConfidence = 7;
 
 //--- Journaling Inputs ---
 input group "Journaling"
@@ -710,6 +724,13 @@ static datetime g_cool_until_buy = 0, g_cool_until_sell = 0;
 // --- T042: Telemetry State ---
 static int      g_tel_barcount = 0;
 static datetime g_tel_lastbar  = 0;
+
+// --- T043: Parity Harness State ---
+static bool     g_pth_is_tester = false;
+static bool     g_pth_is_opt    = false;
+static bool     g_pth_init      = false;
+static datetime g_pth_stamp     = 0;
+static int      g_pth_barcount  = 0;
 
 // --- T026/T027/T029: Per-bar flags for decision journaling ---
 static int    g_vr_flag_for_bar   = 0;
@@ -812,7 +833,7 @@ struct EA_State {
     double   ewma_latency_ms;
     int      rej_history[EA_RejWindowTrades]; // Ring buffer: 1=reject, 0=ok
     int      rej_head;
-    int      rej_count;       // Total valid entries in history
+    int      rej_count;     // Total valid entries in history
     ulong    last_send_ticks;
     double   last_req_price;  // Requested price for slippage calc
 };
@@ -826,30 +847,30 @@ static double   g_msm_atr_hist[MSM_ATR_PctlWindow];
 static int      g_msm_atr_head = 0;
 static int      g_msm_atr_count = 0;
 // Last computed features (for optional logs/debug)
-static double   g_msm_atr      = 0.0;
-static double   g_msm_adx      = 0.0;
-static double   g_msm_pctl     = 0.0;  // 0..1 percentile
-static int      g_msm_state    = 0;    // 0=unknown,1=TREND_UP,2=TREND_DN,3=RANGE,4=BREAKOUT_UP,5=BREAKOUT_DN,6=VOLAT,7=QUIET
-static double   g_msm_mult     = 1.0;
+static double   g_msm_atr       = 0.0;
+static double   g_msm_adx       = 0.0;
+static double   g_msm_pctl      = 0.0;  // 0..1 percentile
+static int      g_msm_state     = 0;    // 0=unknown,1=TREND_UP,2=TREND_DN,3=RANGE,4=BREAKOUT_UP,5=BREAKOUT_DN,6=VOLAT,7=QUIET
+static double   g_msm_mult      = 1.0;
 
 
 // --- T012: Summary Counters ---
-static long g_entries       = 0;
-static long g_wins          = 0;
-static long g_losses        = 0;
-static long g_blk_ze        = 0;
-static long g_blk_bc        = 0;
-static long g_blk_imc       = 0; // T029
-static long g_blk_risk      = 0; // T030
-static long g_blk_over      = 0;
-static long g_blk_spread    = 0;
-static long g_blk_aspread   = 0; // T028
-static long g_blk_smc       = 0;
-static long g_blk_vr        = 0;
-static long g_blk_news      = 0;
-static long g_blk_sp        = 0; // T027
-static long g_blk_phw       = 0; // T037
-static long g_blk_slc       = 0; // T039
+static long g_entries     = 0;
+static long g_wins        = 0;
+static long g_losses      = 0;
+static long g_blk_ze      = 0;
+static long g_blk_bc      = 0;
+static long g_blk_imc     = 0; // T029
+static long g_blk_risk    = 0; // T030
+static long g_blk_over    = 0;
+static long g_blk_spread  = 0;
+static long g_blk_aspread = 0; // T028
+static long g_blk_smc     = 0;
+static long g_blk_vr      = 0;
+static long g_blk_news    = 0;
+static long g_blk_sp      = 0; // T027
+static long g_blk_phw     = 0; // T037
+static long g_blk_slc     = 0; // T039
 static bool g_summary_printed = false;
 // --- Once-per-bar stamps for block counters ---
 datetime g_stamp_conf  = 0;
@@ -878,8 +899,8 @@ datetime g_stamp_approval = 0;
 bool g_auto_hour_mask[24];
 datetime g_hyb_last_alert_bar = 0;
 datetime g_hyb_last_alert_ts  = 0;
-int g_blk_hyb = 0;           // count "alert-only" bars
-datetime g_stamp_hyb = 0;      // once-per-bar stamp
+int g_blk_hyb = 0;          // count "alert-only" bars
+datetime g_stamp_hyb = 0;     // once-per-bar stamp
 #endif
 
 //+------------------------------------------------------------------+
@@ -912,8 +933,8 @@ void PrintSummary()
 bool UpdateSBCacheIfNewBar()
 {
   datetime t = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 1);
-  if(t == 0) return false;          // no history yet
-  if(g_sb.valid && g_sb.closed_bar_time == t) // same bar → already cached
+  if(t == 0) return false;         // no history yet
+  if(g_sb.valid && g_sb.closed_bar_time == t) // same bar -> already cached
     return true;
 
   // Read all 7 buffers for shift=1 in one shot
@@ -952,84 +973,84 @@ bool UpdateSBCacheIfNewBar()
 // Append a line to the AlfredAI journal.
 void AAI_AppendJournal(const string line)
 {
-   if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
-   {
-   Print(line);
-   return;
-   }
+    if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
+    {
+    Print(line);
+    return;
+    }
 
-   // Live/demo: write to file (optional) and also mirror to Experts log
-   string name       = JournalFileName;
-   bool   use_common = JournalUseCommonFiles;
+    // Live/demo: write to file (optional) and also mirror to Experts log
+    string name       = JournalFileName;
+    bool   use_common = JournalUseCommonFiles;
 
-   if (name == NULL || name == "")
-   {
-   Print(line);
-   return;
-   }
+    if (name == NULL || name == "")
+    {
+    Print(line);
+    return;
+    }
 
-   uint flags = FILE_READ | FILE_WRITE | FILE_TXT;
-   if (use_common) flags |= FILE_COMMON;
-   int fh = FileOpen(name, flags);
-   if (fh == INVALID_HANDLE)
-   {
-   PrintFormat("[AAI_JOURNAL] open failed (%d) for '%s'", GetLastError(), name);
-   Print(line);
-   return;
-   }
+    uint flags = FILE_READ | FILE_WRITE | FILE_TXT;
+    if (use_common) flags |= FILE_COMMON;
+    int fh = FileOpen(name, flags);
+    if (fh == INVALID_HANDLE)
+    {
+    PrintFormat("[AAI_JOURNAL] open failed (%d) for '%s'", GetLastError(), name);
+    Print(line);
+    return;
+    }
 
-   FileSeek(fh, 0, SEEK_END);
-   FileWriteString(fh, line + "\r\n");
-   FileFlush(fh);
-   FileClose(fh);
-   // Mirror to Experts log in live/demo
-   Print(line);
+    FileSeek(fh, 0, SEEK_END);
+    FileWriteString(fh, line + "\r\n");
+    FileFlush(fh);
+    FileClose(fh);
+    // Mirror to Experts log in live/demo
+    Print(line);
 }
 
 // Build & write an EXEC line (dir: +1 BUY, -1 SELL).
 void AAI_LogExec(const int dir, double lots_hint = 0.0, const string run_id = "adhoc")
 {
-   double entry = 0.0, sl = 0.0, tp = 0.0, lots_eff = lots_hint;
-   // Prefer immediate trade result (just sent order)
-   double r_price  = trade.ResultPrice();
-   double r_volume = trade.ResultVolume();
-   if (r_price  > 0.0) entry    = r_price;
-   if (r_volume > 0.0) lots_eff = r_volume;
-   // Fallback: live position
-   if (PositionSelect(_Symbol))
-   {
-   double pos_open = PositionGetDouble(POSITION_PRICE_OPEN);
-   double pos_sl   = PositionGetDouble(POSITION_SL);
-   double pos_tp   = PositionGetDouble(POSITION_TP);
-   double pos_vol  = PositionGetDouble(POSITION_VOLUME);
-   if (entry    <= 0.0 && pos_open > 0.0) entry    = pos_open;
-   if (sl       <= 0.0 && pos_sl   > 0.0) sl       = pos_sl;
-   if (tp       <= 0.0 && pos_tp   > 0.0) tp       = pos_tp;
-   if (lots_eff <= 0.0 && pos_vol  > 0.0) lots_eff = pos_vol;
-   }
+    double entry = 0.0, sl = 0.0, tp = 0.0, lots_eff = lots_hint;
+    // Prefer immediate trade result (just sent order)
+    double r_price  = trade.ResultPrice();
+    double r_volume = trade.ResultVolume();
+    if (r_price  > 0.0) entry    = r_price;
+    if (r_volume > 0.0) lots_eff = r_volume;
+    // Fallback: live position
+    if (PositionSelect(_Symbol))
+    {
+    double pos_open = PositionGetDouble(POSITION_PRICE_OPEN);
+    double pos_sl   = PositionGetDouble(POSITION_SL);
+    double pos_tp   = PositionGetDouble(POSITION_TP);
+    double pos_vol  = PositionGetDouble(POSITION_VOLUME);
+    if (entry    <= 0.0 && pos_open > 0.0) entry    = pos_open;
+    if (sl       <= 0.0 && pos_sl   > 0.0) sl       = pos_sl;
+    if (tp       <= 0.0 && pos_tp   > 0.0) tp       = pos_tp;
+    if (lots_eff <= 0.0 && pos_vol  > 0.0) lots_eff = pos_vol;
+    }
 
-   // Format to symbol precision so numbers look right
-   int d = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   string execLine = StringFormat(
-   "EXEC|t=%s|sym=%s|tf=%s|dir=%s|lots=%.2f|entry=%.*f|sl=%.*f|tp=%.*f|rr=%.2f|run=%s",
-   TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-   _Symbol,
-   CurrentTfLabel(),              // your helper, e.g., "M15", "H1", ...
-   (dir > 0 ? "BUY" : "SELL"),
-   lots_eff,
-   d, entry, d, sl, d, tp,
-   Fixed_RR,
-   run_id
-   );
-   // Tester path: print exactly once; no file I/O
-   if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
-   {
-   Print(execLine);
-   return;
-   }
+    // Format to symbol precision so numbers look right
+    int d = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    string execLine = StringFormat(
+    "EXEC|t=%s|sym=%s|tf=%s|dir=%s|lots=%.2f|entry=%.*f|sl=%.*f|tp=%.*f|rr=%.2f|run=%s",
+    TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+    _Symbol,
+    CurrentTfLabel(),           // your helper, e.g., "M15", "H1", ...
+    (dir > 0 ? "BUY" : "SELL"),
+    lots_eff,
+    d, entry, d, sl, d, tp,
+    Fixed_RR,
+    run_id
+    );
+    // Tester path: print exactly once; no file I/O
+    if (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
+    {
+    Print(execLine);
+    return;
+    }
 
-   // Live/demo: file (if configured) + Experts log
-   AAI_AppendJournal(execLine);
+    // Live/demo: file (if configured) + Experts log
+    AAI_AppendJournal(execLine);
 }
 
 #endif
@@ -1177,6 +1198,67 @@ void Telemetry_OnBar()
 }
 
 //+------------------------------------------------------------------+
+//| T043: Parity Harness Emitter                                     |
+//+------------------------------------------------------------------+
+void ParityHarness_OnBar(const int direction,
+                         const double conf_pre_gate,
+                         const bool   allowed,
+                         const string reason_id,
+                         const int    dev_pts)
+{
+    if(!PTH_Enable) return;
+    if(g_sb.closed_bar_time == g_pth_stamp) return; // once/bar
+    g_pth_stamp = g_sb.closed_bar_time;
+    g_pth_barcount++;
+
+    if(PTH_EmitEveryN <= 0) return;
+    if((g_pth_barcount % PTH_EmitEveryN) != 0) return;
+
+    if(!g_pth_init) {
+        g_pth_is_tester = (bool)MQLInfoInteger(MQL_TESTER);
+        g_pth_is_opt    = (bool)MQLInfoInteger(MQL_OPTIMIZATION);
+        g_pth_init = true;
+    }
+
+    // Stable, shift=1 data from MQL5 arrays
+    double c1[1], h1[1], l1[1];
+    CopyClose(_Symbol, _Period, 1, 1, c1);
+    CopyHigh(_Symbol, _Period, 1, 1, h1);
+    CopyLow(_Symbol, _Period, 1, 1, l1);
+    
+    const int spr = CurrentSpreadPoints();
+    const string env = g_pth_is_tester ? (g_pth_is_opt ? "TEST_OPT" : "TEST") : "LIVE";
+
+    // Pull existing module signals (already stored globally by prior tickets)
+    const int    msm_state = g_msm_state;
+    const double msm_mult  = g_msm_mult;
+    const double dd_abs = AAI_peak - AAI_curve;
+    const double denom  = (AAI_peak!=0.0 ? MathAbs(AAI_peak) : 1.0);
+    const double dd_pct = (denom>0.0 ? 100.0*(dd_abs/denom) : 0.0);
+
+    // One-line core (keep order stable)
+    string core = StringFormat("t=%s|env=%s|sym=%s|tf=%s|c1=%.5f|h1=%.5f|l1=%.5f|spr=%d|pt=%.5f|dir=%d|conf=%.1f|msm=%d:%.3f|dd=%.2f|dev=%d|allow=%d|rsn=%s",
+        TimeToString(g_sb.closed_bar_time, TIME_DATE|TIME_SECONDS),
+        env, _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period),
+        c1[0], h1[0], l1[0], spr, _Point, direction, conf_pre_gate, msm_state, msm_mult, dd_pct, dev_pts, (int)allowed, reason_id);
+
+    uint hash = FNV1a32(core);
+    
+    string final_log_string;
+    if(PTH_LogVerbose) {
+        final_log_string = StringFormat("%s|%s|hash=0x%08X", PTH_Prefix, core, hash);
+    } else {
+        // Short version as requested
+        string short_core = StringFormat("t=%s|env=%s|c1=%.5f|spr=%d|dir=%d|conf=%.1f|msm=%d:%.3f|dd=%.2f|dev=%d|alw=%d|rsn=%s",
+            TimeToString(g_sb.closed_bar_time, TIME_SECONDS),
+            env, c1[0], spr, direction, conf_pre_gate, msm_state, msm_mult, dd_pct, dev_pts, (int)allowed, reason_id);
+        final_log_string = StringFormat("%s|%s|h=0x%08X", PTH_Prefix, short_core, hash);
+    }
+    Print(final_log_string);
+}
+
+
+//+------------------------------------------------------------------+
 //| T026: Decision Journaling CSV Helper                             |
 //+------------------------------------------------------------------+
 void DJ_Write(const int direction,
@@ -1267,89 +1349,89 @@ void DJ_Write(const int direction,
 //+------------------------------------------------------------------+
 bool WriteText(const string path, const string text)
 {
-   int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE){ PrintFormat("[HYBRID] FileOpen write fail %s (%d)", path, GetLastError()); return false; }
-   FileWriteString(h, text);
-   FileClose(h);
-   return true;
+    int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI);
+    if(h==INVALID_HANDLE){ PrintFormat("[HYBRID] FileOpen write fail %s (%d)", path, GetLastError()); return false; }
+    FileWriteString(h, text);
+    FileClose(h);
+    return true;
 }
 
 string ReadAll(const string path)
 {
-   int h = FileOpen(path, FILE_READ|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) return "";
-   string s = FileReadString(h, (int)FileSize(h));
-   FileClose(h);
-   return s;
+    int h = FileOpen(path, FILE_READ|FILE_TXT|FILE_ANSI);
+    if(h==INVALID_HANDLE) return "";
+    string s = FileReadString(h, (int)FileSize(h));
+    FileClose(h);
+    return s;
 }
 
 string JsonGetStr(const string json, const string key)
 {
-   string pat="\""+key+"\":\"";
-   int p=StringFind(json, pat); if(p<0) return "";
-   p+=StringLen(pat);
-   int q=StringFind(json,"\"",p);
-   if(q<0) return "";
-   return StringSubstr(json, p, q-p);
+    string pat="\""+key+"\":\"";
+    int p=StringFind(json, pat); if(p<0) return "";
+    p+=StringLen(pat);
+    int q=StringFind(json,"\"",p);
+    if(q<0) return "";
+    return StringSubstr(json, p, q-p);
 }
 
 #ifndef AAI_HYBRID_UTILS_DEFINED
 #define AAI_HYBRID_UTILS_DEFINED
 void AAI_ParseHourRanges(const string ranges, bool &mask[])
 {
-   ArrayInitialize(mask,false);
-   string parts[];
-   int n=StringSplit(ranges, ',', parts);
-   for(int i=0;i<n;i++){
-   string p = parts[i];
-   AAI_Trim(p);
-   if(StringLen(p)==0) continue;
-   int dash=StringFind(p,"-");
-   if(dash<0){ int h=(int)StringToInteger(p)%24; if(h>=0) mask[h]=true; continue; }
-   int a=(int)StringToInteger(StringSubstr(p,0,dash));
-   int b=(int)StringToInteger(StringSubstr(p,dash+1));
-   a=(a%24+24)%24; b=(b%24+24)%24;
-   if(a<=b){ for(int h=a;h<=b;h++) mask[h]=true; }
-   else     { for(int h=a;h<24;h++) mask[h]=true;
-   for(int h=0;h<=b;h++) mask[h]=true; }
-   }
+    ArrayInitialize(mask,false);
+    string parts[];
+    int n=StringSplit(ranges, ',', parts);
+    for(int i=0;i<n;i++){
+    string p = parts[i];
+    AAI_Trim(p);
+    if(StringLen(p)==0) continue;
+    int dash=StringFind(p,"-");
+    if(dash<0){ int h=(int)StringToInteger(p)%24; if(h>=0) mask[h]=true; continue; }
+    int a=(int)StringToInteger(StringSubstr(p,0,dash));
+    int b=(int)StringToInteger(StringSubstr(p,dash+1));
+    a=(a%24+24)%24; b=(b%24+24)%24;
+    if(a<=b){ for(int h=a;h<=b;h++) mask[h]=true; }
+    else     { for(int h=a;h<24;h++) mask[h]=true;
+    for(int h=0;h<=b;h++) mask[h]=true; }
+    }
 }
 bool AAI_HourDayAutoOK()
 {
-   MqlDateTime dt; TimeToStruct(TimeTradeServer(), dt);
-   bool day_ok = ( (dt.day_of_week==0 && AutoSun) || (dt.day_of_week==1 && AutoMon) || (dt.day_of_week==2 && AutoTue) ||
-                   (dt.day_of_week==3 && AutoWed) || (dt.day_of_week==4 && AutoThu) || (dt.day_of_week==5 && AutoFri) ||
-                   (dt.day_of_week==6 && AutoSat) );
-   bool hour_ok = g_auto_hour_mask[dt.hour];
-   return (day_ok && hour_ok);
+    MqlDateTime dt; TimeToStruct(TimeTradeServer(), dt);
+    bool day_ok = ( (dt.day_of_week==0 && AutoSun) || (dt.day_of_week==1 && AutoMon) || (dt.day_of_week==2 && AutoTue) ||
+                    (dt.day_of_week==3 && AutoWed) || (dt.day_of_week==4 && AutoThu) || (dt.day_of_week==5 && AutoFri) ||
+                    (dt.day_of_week==6 && AutoSat) );
+    bool hour_ok = g_auto_hour_mask[dt.hour];
+    return (day_ok && hour_ok);
 }
 void AAI_RaiseHybridAlert(const string side, const double conf_eff, const double ze_strength,
                           const double smc_conf, const int spread_pts,
                           const double atr_pips, const double entry, const double sl, const double tp)
 {
-   // once-per-bar throttle
-   if(g_lastBarTime==g_hyb_last_alert_bar)
-   {
+    // once-per-bar throttle
+    if(g_lastBarTime==g_hyb_last_alert_bar)
+    {
 
-   if((TimeCurrent() - g_hyb_last_alert_ts) < HybridAlertThrottleSec) return;
-   }
-   g_hyb_last_alert_bar = g_lastBarTime;
-   g_hyb_last_alert_ts  = TimeCurrent();
-   string msg = StringFormat("[HYBRID_ALERT] %s %s conf=%.1f ZE=%.1f SMC=%.1f spr=%d atr=%.1fp @%.5f SL=%.5f TP=%.5f",
-                             _Symbol, side, conf_eff, ze_strength, smc_conf, spread_pts, atr_pips, entry, sl, tp);
-   if(HybridAlertPopup) Alert(msg);
-   if(HybridAlertPush)  SendNotification(msg);
+    if((TimeCurrent() - g_hyb_last_alert_ts) < HybridAlertThrottleSec) return;
+    }
+    g_hyb_last_alert_bar = g_lastBarTime;
+    g_hyb_last_alert_ts  = TimeCurrent();
+    string msg = StringFormat("[HYBRID_ALERT] %s %s conf=%.1f ZE=%.1f SMC=%.1f spr=%d atr=%.1fp @%.5f SL=%.5f TP=%.5f",
+                              _Symbol, side, conf_eff, ze_strength, smc_conf, spread_pts, atr_pips, entry, sl, tp);
+    if(HybridAlertPopup) Alert(msg);
+    if(HybridAlertPush)  SendNotification(msg);
 
-   if(HybridAlertWriteIntent)
-   {
-   // write a simple intent file for your existing hybrid workflow
-   string fn = StringFormat("%s\\%s_%s_%I64d.txt", g_dir_intent, _Symbol, side, (long)g_lastBarTime);
-   int h = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h!=INVALID_HANDLE){
+    if(HybridAlertWriteIntent)
+    {
+    // write a simple intent file for your existing hybrid workflow
+    string fn = StringFormat("%s\\%s_%s_%I64d.txt", g_dir_intent, _Symbol, side, (long)g_lastBarTime);
+    int h = FileOpen(fn, FILE_WRITE|FILE_TXT|FILE_ANSI);
+    if(h!=INVALID_HANDLE){
       FileWrite(h, msg);
       FileClose(h);
-   }
-   }
+    }
+    }
 }
 #endif
 
@@ -1554,6 +1636,9 @@ void RG_ResetDay()
     
     // --- T042: Reset Telemetry Counter ---
     g_tel_barcount = 0;
+    
+    // --- T043: Reset Parity Harness Counter ---
+    g_pth_barcount = 0;
 }
 
 
@@ -1811,7 +1896,7 @@ bool SLTA_AdjustAndRescale(const int direction,
   double tp_pts0 = (tp_price_io>0.0 ? MathAbs(tp_price_io - entry_price)/point : 0.0);
 
   if(sl_pts0 <= 0.0){
-    if(InpSLTA_LogVerbose) Print("[SLTA] No SL provided; cannot control risk — cancel.");
+    if(InpSLTA_LogVerbose) Print("[SLTA] No SL provided; cannot control risk - cancel.");
     return !InpSLTA_StrictCancel;
   }
 
@@ -1830,7 +1915,7 @@ bool SLTA_AdjustAndRescale(const int direction,
   if(sl_pts0 > 0.0 && InpSLTA_MaxWidenFrac > 0.0){
     double allowed = sl_pts0 * (1.0 + InpSLTA_MaxWidenFrac);
     if(sl_pts1 > allowed){
-      if(InpSLTA_LogVerbose) PrintFormat("[SLTA] SL widening %.0f→%.0f pts exceeds limit (max %.0f).",
+      if(InpSLTA_LogVerbose) PrintFormat("[SLTA] SL widening %.0f->%.0f pts exceeds limit (max %.0f).",
                                        sl_pts0, sl_pts1, allowed);
       return !InpSLTA_StrictCancel;
     }
@@ -1862,14 +1947,14 @@ bool SLTA_AdjustAndRescale(const int direction,
   if((InpSLTA_Mode == SLTA_ADJUST_TP_KEEP_RR || InpSLTA_Mode == SLTA_SCALE_BOTH) && InpSLTA_MinRR > 0.0 && tp_pts1 > 0.0){
     double rr_eff = (sl_pts1 > 0) ? tp_pts1 / sl_pts1 : 0;
     if(rr_eff + 1e-9 < InpSLTA_MinRR){
-      if(InpSLTA_LogVerbose) PrintFormat("[SLTA] RR %.2f below MinRR %.2f after adjust — cancel.", rr_eff, InpSLTA_MinRR);
+      if(InpSLTA_LogVerbose) PrintFormat("[SLTA] RR %.2f below MinRR %.2f after adjust - cancel.", rr_eff, InpSLTA_MinRR);
       return !InpSLTA_StrictCancel;
     }
   }
 
   double lots_new = CalculateLotSize(conf_for_sizing, sl_pts1 * point);
   if(lots_new <= 0.0){
-    if(InpSLTA_LogVerbose) Print("[SLTA] Lot sizing failed after SL adjust — cancel.");
+    if(InpSLTA_LogVerbose) Print("[SLTA] Lot sizing failed after SL adjust - cancel.");
     return !InpSLTA_StrictCancel;
   }
   lots_io = lots_new;
@@ -2323,6 +2408,7 @@ void PT_OnTick()
     return; // one action per tick
   }
 }
+//... (rest of the file is identical) ...
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
