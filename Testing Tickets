@@ -18,7 +18,7 @@ double   AAI_max_dd = 0.0;
 
 long     AAI_last_in_pos_id = -1;
 datetime AAI_last_in_time = 0;
-ulong    AAI_last_out_deal = 0;      // dedupe out deals
+ulong    AAI_last_out_deal = 0;     // dedupe out deals
 ulong    AAI_last_in_deal  = 0;
 // (reuses exec hook dedupe if present)
 
@@ -48,14 +48,14 @@ int    AAI_dur_count   = 0;
 // ==================== /AAI METRICS ======================
 //+------------------------------------------------------------------+
 //| AAI_EA_Trade_Manager.mq5                                         |
-//|                           v5.10 - SL Cluster Micro-Cooldowns     |
+//|                           v5.11 - Market State Model v1          |
 //|                                                                  |
 //| (Consumes all data from the refactored AAI_Indicator_SignalBrain)|
 //|                                                                  |
 //| Copyright 2025, AlfredAI Project                                 |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "5.10"
+#property version   "5.11"
 #property description "Manages trades based on signals from the central SignalBrain indicator."
 #include <Trade\Trade.mqh>
 #include <Arrays\ArrayObj.mqh>
@@ -144,11 +144,34 @@ const int    EA_MaxDeviationPts  = 40;
 const double EA_DevVsSlipMul     = 1.20;
 const double EA_DevVsSpreadFrac  = 0.60;
 const int    EA_RejBumpPts       = 4;
-// replace the const with this:
 enum { EA_RejWindowTrades = 8 };
 const int    EA_LatBumpMs        = 250;
 const int    EA_LatBumpPts       = 2;
 const bool   EA_LogVerbose       = false;
+
+// --- T041: Market State Model (MSM) Constants ---
+// Window sizes (compile-time)
+enum {
+    MSM_ATR_Period       = 14,
+    MSM_ADX_Period       = 14,
+    MSM_EMA_Fast         = 20,
+    MSM_EMA_Slow         = 50,
+    MSM_ATR_PctlWindow   = 200,   // ATR history for percentile
+    MSM_Brk_Period       = 20     // Donchian breakout lookback (excl. current bar)
+};
+// Tunables
+const bool   MSM_Enable           = true;
+const double MSM_PctlVolatile     = 0.70;  // ATR percentile ≥ 70% → volatile
+const double MSM_PctlQuiet        = 0.30;  // ATR percentile ≤ 30% → quiet
+const double MSM_ADX_TrendThresh  = 22.0;  // ADX ≥ 22 → trending
+const double MSM_ADX_RangeThresh  = 18.0;  // ADX ≤ 18 → ranging bias
+const double MSM_MaxUpMult        = 1.08;  // cap boost
+const double MSM_MaxDnMult        = 0.90;  // cap penalty
+const double MSM_MisalignedTrend  = 0.92;  // penalty when signal vs trend disagree
+const double MSM_RangePenalty     = 0.96;  // small mean-reversion bias
+const double MSM_VolatPenalty     = 0.93;  // higher noise → caution
+const double MSM_QuietPenalty     = 0.96;  // low ATR → slip/fill risk
+const bool   MSM_LogVerbose       = false; // throttle to ≤1/bar
 
 
 // --- EA Fixes (Part B): Indicator Path Helper ---
@@ -226,9 +249,9 @@ inline string TfLabel(ENUM_TIMEFRAMES tf) {
 
 inline string CurrentTfLabel() {
    ENUM_TIMEFRAMES eff = (SignalTimeframe == PERIOD_CURRENT)
-                         ?
+                           ?
    (ENUM_TIMEFRAMES)_Period
-                         : SignalTimeframe;
+                           : SignalTimeframe;
    return TfLabel(eff);
 }
 
@@ -315,32 +338,32 @@ input double InpSB_ConflictPenalty = 0.80;
 // --- All Pass-Through Inputs for the new SignalBrain ---
 input group "--- SignalBrain Pass-Through Inputs ---";
 // Core SB Settings
-input bool   SB_SafeTest          = false;
-input bool   SB_UseZE             = true;
-input bool   SB_UseBC             = true;
-input bool   SB_UseSMC            = true;
-input int    SB_WarmupBars        = 150;
-input int    SB_FastMA            = 10;
-input int    SB_SlowMA            = 30;
-input int    SB_MinZoneStrength   = 4;
-input bool   SB_EnableDebug       = true;
+input bool   SB_SafeTest         = false;
+input bool   SB_UseZE            = true;
+input bool   SB_UseBC            = true;
+input bool   SB_UseSMC           = true;
+input int    SB_WarmupBars       = 150;
+input int    SB_FastMA           = 10;
+input int    SB_SlowMA           = 30;
+input int    SB_MinZoneStrength  = 4;
+input bool   SB_EnableDebug      = true;
 // SB Confidence Model (Additive Path)
-input int    SB_Bonus_ZE          = 25;
-input int    SB_Bonus_BC          = 25;
-input int    SB_Bonus_SMC         = 25;
-input int    SB_BaseConf          = 40;
+input int    SB_Bonus_ZE         = 25;
+input int    SB_Bonus_BC         = 25;
+input int    SB_Bonus_SMC        = 25;
+input int    SB_BaseConf         = 40;
 // BC Pass-Through
-input int    SB_BC_FastMA         = 10;
-input int    SB_BC_SlowMA         = 30;
+input int    SB_BC_FastMA        = 10;
+input int    SB_BC_SlowMA        = 30;
 // ZE Pass-Through
 input double SB_ZE_MinImpulseMovePips = 10.0;
 // SMC Pass-Through
-input bool   SB_SMC_UseFVG        = true;
-input bool   SB_SMC_UseOB         = true;
-input bool   SB_SMC_UseBOS        = true;
-input double SB_SMC_FVG_MinPips   = 1.0;
-input int    SB_SMC_OB_Lookback   = 20;
-input int    SB_SMC_BOS_Lookback  = 50;
+input bool   SB_SMC_UseFVG       = true;
+input bool   SB_SMC_UseOB        = true;
+input bool   SB_SMC_UseBOS       = true;
+input double SB_SMC_FVG_MinPips  = 1.0;
+input int    SB_SMC_OB_Lookback  = 20;
+input int    SB_SMC_BOS_Lookback = 50;
 
 
 //--- Risk Management Inputs ---
@@ -422,24 +445,24 @@ input int    BE_Offset_Points    = 1;
 
 // --- Trailing / Break-Even (T035) ---
 input group "Trailing / Break-Even"
-input bool          InpTRL_Enable          = true;
-input ENUM_TRL_Mode InpTRL_Mode            = TRL_ATR;
-input bool          InpTRL_OnBarClose      = true;
+input bool          InpTRL_Enable            = true;
+input ENUM_TRL_Mode InpTRL_Mode              = TRL_ATR;
+input bool          InpTRL_OnBarClose        = true;
 input int           InpTRL_MinSecondsBetween = 15;
-input bool          InpTRL_BE_Enable       = true;
-input double        InpTRL_BE_TriggerRR    = 1.0;
-input int           InpTRL_BE_TriggerPts   = 0;
-input int           InpTRL_BE_OffsetPts    = 2;
+input bool          InpTRL_BE_Enable         = true;
+input double        InpTRL_BE_TriggerRR      = 1.0;
+input int           InpTRL_BE_TriggerPts     = 0;
+input int           InpTRL_BE_OffsetPts      = 2;
 input ENUM_TIMEFRAMES InpTRL_ATR_Timeframe   = PERIOD_CURRENT;
-input int           InpTRL_ATR_Period      = 14;
-input double        InpTRL_ATR_Mult        = 2.0;
+input int           InpTRL_ATR_Period        = 14;
+input double        InpTRL_ATR_Mult          = 2.0;
 input int           InpTRL_AtrLookbackBars   = 22;
 input int           InpTRL_SwingLookbackBars = 50;
-input int           InpTRL_SwingLeg        = 2;
-input int           InpTRL_SwingBufferPts  = 5;
-input int           InpTRL_MinBumpPts      = 2;
-input int           InpTRL_MaxDailyMoves   = 10;
-input bool          InpTRL_LogVerbose      = false;
+input int           InpTRL_SwingLeg          = 2;
+input int           InpTRL_SwingBufferPts    = 5;
+input int           InpTRL_MinBumpPts        = 2;
+input int           InpTRL_MaxDailyMoves     = 10;
+input bool          InpTRL_LogVerbose        = false;
 
 // --- Partial Take-Profit Ladder (T036) ---
 input group "Partial Take-Profit Ladder"
@@ -473,14 +496,14 @@ input bool        InpPT_LogVerbose      = false;
 
 //--- Entry Filter Inputs (M15 Baseline) ---
 input group "Entry Filters"
-input int        MinConfidence       = 50;
+input int         MinConfidence       = 50;
 // --- T011: Over-extension Inputs ---
 input group "Over-extension Guard"
 input ENUM_OVEREXT_MODE OverExtMode = WaitForBand;
-input int    OverExt_MA_Period   = 20;
-input int    OverExt_ATR_Period  = 14;
-input double OverExt_ATR_Mult    = 2.0;
-input int    OverExt_WaitBars    = 3;
+input int    OverExt_MA_Period  = 20;
+input int    OverExt_ATR_Period = 14;
+input double OverExt_ATR_Mult   = 2.0;
+input int    OverExt_WaitBars   = 3;
 
 //--- T022: Volatility Regime Inputs ---
 input group "Volatility Regime"
@@ -545,13 +568,13 @@ enum ENUM_IMC_Method { IMC_ROC=0 };
 input bool          InpIMC_Enable         = true;
 input ENUM_IMC_Mode InpIMC_Mode           = IMC_REQUIRED;
 input string        InpIMC1_Symbol        = "";
-input ENUM_TIMEFRAMES InpIMC1_Timeframe     = PERIOD_H1;
+input ENUM_TIMEFRAMES InpIMC1_Timeframe   = PERIOD_H1;
 input ENUM_IMC_Rel  InpIMC1_Relation      = IMC_CONTRA;
 input ENUM_IMC_Method InpIMC1_Method      = IMC_ROC;
 input int           InpIMC1_LookbackBars  = 10;
 input double        InpIMC1_MinAbsRocBps  = 0.0;
 input string        InpIMC2_Symbol        = "";
-input ENUM_TIMEFRAMES InpIMC2_Timeframe     = PERIOD_H1;
+input ENUM_TIMEFRAMES InpIMC2_Timeframe   = PERIOD_H1;
 input ENUM_IMC_Rel  InpIMC2_Relation      = IMC_ALIGN;
 input ENUM_IMC_Method InpIMC2_Method      = IMC_ROC;
 input int           InpIMC2_LookbackBars  = 10;
@@ -654,6 +677,12 @@ int g_hOverextMA = INVALID_HANDLE;
 int g_hATR_VR = INVALID_HANDLE; // T022: New handle for Volatility Regime
 int g_hATR_SP = INVALID_HANDLE; // T027: New handle for Structure Proximity
 int g_hATR_TRL = INVALID_HANDLE; // T035
+// T041
+int g_hMSM_ATR = INVALID_HANDLE;
+int g_hMSM_ADX = INVALID_HANDLE;
+int g_hMSM_EMA_Fast = INVALID_HANDLE;
+int g_hMSM_EMA_Slow = INVALID_HANDLE;
+
 
 // --- State Management Globals ---
 static datetime g_lastBarTime = 0;
@@ -775,6 +804,19 @@ struct EA_State {
 };
 static EA_State g_ea_state;
 
+// --- T041: Market State Model State ---
+static datetime g_stamp_msm = 0;
+// ATR history for percentile
+static double   g_msm_atr_hist[MSM_ATR_PctlWindow];
+static int      g_msm_atr_head = 0;
+static int      g_msm_atr_count = 0;
+// Last computed features (for optional logs/debug)
+static double   g_msm_atr      = 0.0;
+static double   g_msm_adx      = 0.0;
+static double   g_msm_pctl     = 0.0;  // 0..1 percentile
+static int      g_msm_state    = 0;    // 0=unknown,1=TREND_UP,2=TREND_DN,3=RANGE,4=BREAKOUT_UP,5=BREAKOUT_DN,6=VOLAT,7=QUIET
+static double   g_msm_mult     = 1.0;
+
 
 // --- T012: Summary Counters ---
 static long g_entries       = 0;
@@ -821,8 +863,8 @@ datetime g_stamp_approval = 0;
 bool g_auto_hour_mask[24];
 datetime g_hyb_last_alert_bar = 0;
 datetime g_hyb_last_alert_ts  = 0;
-int g_blk_hyb = 0;             // count "alert-only" bars
-datetime g_stamp_hyb = 0;      // once-per-bar stamp
+int g_blk_hyb = 0;              // count "alert-only" bars
+datetime g_stamp_hyb = 0;       // once-per-bar stamp
 #endif
 
 //+------------------------------------------------------------------+
@@ -855,7 +897,7 @@ void PrintSummary()
 bool UpdateSBCacheIfNewBar()
 {
   datetime t = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 1);
-  if(t == 0) return false;              // no history yet
+  if(t == 0) return false;           // no history yet
   if(g_sb.valid && g_sb.closed_bar_time == t) // same bar → already cached
     return true;
 
@@ -1433,6 +1475,11 @@ void RG_ResetDay()
     g_rg_block_active = false;
     g_rg_block_until = 0;
     PrintFormat("[RISK_GUARD] Day rolled over. Anchor: %s, Start Balance: %.2f", TimeToString(g_rg_day_anchor_time), g_rg_day_start_balance);
+    
+    // --- T041: Optional Daily Reset for MSM ---
+    g_msm_atr_head = 0;
+    g_msm_atr_count = 0;
+    ArrayInitialize(g_msm_atr_hist, 0.0);
 }
 
 
@@ -1519,8 +1566,6 @@ int EA_GetAdaptiveDeviation()
 
     return final_dev;
 }
-
-
 //+------------------------------------------------------------------+
 //| >>> T031: Order Send Robustness Helpers <<<                      |
 //+------------------------------------------------------------------+
@@ -1699,7 +1744,7 @@ bool SLTA_AdjustAndRescale(const int direction,
     double min_sl = entry_price - minStopsPx;
     if(sl_price_io <= 0.0 || sl_price_io >= min_sl)
       sl_price_io = min_sl;
-  }else{             // SELL: SL above entry
+  }else{           // SELL: SL above entry
     double min_sl = entry_price + minStopsPx;
     if(sl_price_io <= 0.0 || sl_price_io <= min_sl)
       sl_price_io = min_sl;
@@ -1711,7 +1756,7 @@ bool SLTA_AdjustAndRescale(const int direction,
     double allowed = sl_pts0 * (1.0 + InpSLTA_MaxWidenFrac);
     if(sl_pts1 > allowed){
       if(InpSLTA_LogVerbose) PrintFormat("[SLTA] SL widening %.0f→%.0f pts exceeds limit (max %.0f).",
-                                         sl_pts0, sl_pts1, allowed);
+                                       sl_pts0, sl_pts1, allowed);
       return !InpSLTA_StrictCancel;
     }
   }
@@ -2283,22 +2328,28 @@ g_ea_state.rej_count = 0;
 g_ea_state.last_send_ticks = 0;
 g_ea_state.last_req_price = 0.0;
 
+// --- T041: Init Market State Model ---
+g_stamp_msm = 0;
+g_msm_atr_head = 0;
+g_msm_atr_count = 0;
+ArrayInitialize(g_msm_atr_hist, 0.0);
+
 
 // --- TICKET #2: Create the single, centralized SignalBrain handle ---
 sb_handle = iCustom(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, AAI_Ind("AAI_Indicator_SignalBrain"),
-                    // Core SB Settings
-                    SB_SafeTest, SB_UseZE, SB_UseBC, SB_UseSMC, SB_WarmupBars, SB_FastMA, SB_SlowMA,
-                    SB_MinZoneStrength, SB_EnableDebug,
-                    // SB Confidence Model
-                    SB_Bonus_ZE, SB_Bonus_BC, SB_Bonus_SMC,
-                    // BC Pass-Through
-                    SB_BC_FastMA, SB_BC_SlowMA,
-                    // ZE Pass-Through
-                    SB_ZE_MinImpulseMovePips,
-                    // SMC Pass-Through
-                    SB_SMC_UseFVG, SB_SMC_UseOB, SB_SMC_UseBOS, SB_SMC_FVG_MinPips,
-                    SB_SMC_OB_Lookback, SB_SMC_BOS_Lookback
-                   );
+                 // Core SB Settings
+                 SB_SafeTest, SB_UseZE, SB_UseBC, SB_UseSMC, SB_WarmupBars, SB_FastMA, SB_SlowMA,
+                 SB_MinZoneStrength, SB_EnableDebug,
+                 // SB Confidence Model
+                 SB_Bonus_ZE, SB_Bonus_BC, SB_Bonus_SMC,
+                 // BC Pass-Through
+                 SB_BC_FastMA, SB_BC_SlowMA,
+                 // ZE Pass-Through
+                 SB_ZE_MinImpulseMovePips,
+                 // SMC Pass-Through
+                 SB_SMC_UseFVG, SB_SMC_UseOB, SB_SMC_UseBOS, SB_SMC_FVG_MinPips,
+                 SB_SMC_OB_Lookback, SB_SMC_BOS_Lookback
+                );
 
 if(sb_handle == INVALID_HANDLE)
 {
@@ -2331,6 +2382,19 @@ if(sb_handle == INVALID_HANDLE)
       g_hATR_TRL = iATR(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, InpTRL_ATR_Period);
       if(g_hATR_TRL == INVALID_HANDLE) { PrintFormat("%s Failed to create Trailing ATR handle", INIT_ERROR); return(INIT_FAILED); }
     }
+    
+    // --- T041: Initialize MSM handles ---
+    g_hMSM_ATR = iATR(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, MSM_ATR_Period);
+    if(g_hMSM_ATR == INVALID_HANDLE) { PrintFormat("%s Failed to create MSM ATR handle", INIT_ERROR); return(INIT_FAILED); }
+
+    g_hMSM_ADX = iADX(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, MSM_ADX_Period);
+    if(g_hMSM_ADX == INVALID_HANDLE) { PrintFormat("%s Failed to create MSM ADX handle", INIT_ERROR); return(INIT_FAILED); }
+
+    g_hMSM_EMA_Fast = iMA(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, MSM_EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+    if(g_hMSM_EMA_Fast == INVALID_HANDLE) { PrintFormat("%s Failed to create MSM Fast EMA handle", INIT_ERROR); return(INIT_FAILED); }
+
+    g_hMSM_EMA_Slow = iMA(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, MSM_EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+    if(g_hMSM_EMA_Slow == INVALID_HANDLE) { PrintFormat("%s Failed to create MSM Slow EMA handle", INIT_ERROR); return(INIT_FAILED); }
 
     if(Hybrid_RequireApproval)
     {
@@ -2405,11 +2469,15 @@ g_trl_states.Clear();
     if(g_hATR_VR != INVALID_HANDLE) IndicatorRelease(g_hATR_VR);
     if(g_hATR_SP != INVALID_HANDLE) IndicatorRelease(g_hATR_SP);
     if(g_hATR_TRL != INVALID_HANDLE) IndicatorRelease(g_hATR_TRL);
+    // T041
+    if(g_hMSM_ATR != INVALID_HANDLE) IndicatorRelease(g_hMSM_ATR);
+    if(g_hMSM_ADX != INVALID_HANDLE) IndicatorRelease(g_hMSM_ADX);
+    if(g_hMSM_EMA_Fast != INVALID_HANDLE) IndicatorRelease(g_hMSM_EMA_Fast);
+    if(g_hMSM_EMA_Slow != INVALID_HANDLE) IndicatorRelease(g_hMSM_EMA_Slow);
 
     // --- T006: Clean up HUD Object ---
     ObjectDelete(0, HUD_OBJECT_NAME);
 }
-
 
 //+------------------------------------------------------------------+
 //| HYBRID: Emit trade intent to file                                |
