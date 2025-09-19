@@ -802,7 +802,7 @@ datetime g_stamp_hyb = 0;      // once-per-bar stamp
 void PrintSummary()
 {
     if(g_summary_printed) return;
-    PrintFormat("AAI_SUMMARY|entries=%d|wins=%d|losses=%d|ze_blk=%d|bc_blk=%d|smc_blk=%d|overext_blk=%d|spread_blk=%d|aspread_blk=%d|vr_blk=%d|news_blk=%d|sp_blk=%d|imc_blk=%d|risk_blk=%d|phw_blk=%d",
+    PrintFormat("AAI_SUMMARY|entries=%d|wins=%d|losses=%d|ze_blk=%d|bc_blk=%d|smc_blk=%d|overext_blk=%d|spread_blk=%d|aspread_blk=%d|vr_blk=%d|news_blk=%d|sp_blk=%d|imc_blk=%d|risk_blk=%d|phw_blk=%d|slc_blk=%d",
                 g_entries,
                 g_wins,
                 g_losses,
@@ -817,7 +817,8 @@ void PrintSummary()
                 g_blk_sp,
                 g_blk_imc,
                 g_blk_risk,
-                g_blk_phw);
+                g_blk_phw,
+                g_blk_slc);
     g_summary_printed = true;
 }
 
@@ -2440,7 +2441,7 @@ void SLC_ProcessEvent(int original_direction, double sl_price, datetime sl_time)
         {
             g_slc_repeats_buy++;
             double cool_sec = MathMin(SLC_CooldownMaxSec, SLC_CooldownMinSec * MathPow(SLC_BackoffMultiplier, g_slc_repeats_buy - 1));
-            g_slc_cool_until_buy = sl_time + (long)cool_sec;
+g_slc_cool_until_buy  = (datetime)(sl_time + (long)MathRound(cool_sec));
             if(SLC_LogVerbose) PrintFormat("[SLC_EVENT] BUY cluster detected (size=%d), cool until %s", cluster_size, TimeToString(g_slc_cool_until_buy));
         }
     }
@@ -2468,7 +2469,7 @@ void SLC_ProcessEvent(int original_direction, double sl_price, datetime sl_time)
         {
             g_slc_repeats_sell++;
             double cool_sec = MathMin(SLC_CooldownMaxSec, SLC_CooldownMinSec * MathPow(SLC_BackoffMultiplier, g_slc_repeats_sell - 1));
-            g_slc_cool_until_sell = sl_time + (long)cool_sec;
+g_slc_cool_until_sell = (datetime)(sl_time + (long)MathRound(cool_sec));
             if(SLC_LogVerbose) PrintFormat("[SLC_EVENT] SELL cluster detected (size=%d), cool until %s", cluster_size, TimeToString(g_slc_cool_until_sell));
         }
     }
