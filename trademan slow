@@ -1078,6 +1078,7 @@ bool UpdateSBCacheIfNewBar()
 {
   datetime t = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 1);
   if(t == 0) return false;       // no history yet
+// new: same bar → nothing to do; only return true on a NEW bar
 if(g_sb.valid && g_sb.closed_bar_time == t)
     return false;
 
@@ -3435,14 +3436,52 @@ if(trans.type == TRADE_TRANSACTION_DEAL_ADD && HistoryDealSelect(trans.deal))
 //+------------------------------------------------------------------+
 // Sample current spread (in POINTS) and append to the adaptive-spread buffer.
 // Works on variable-spread brokers (no reliance on SYMBOL_SPREAD).
+// Sample current spread (in POINTS) and append to the adaptive-spread buffer.
+// Bounded & cadence-aware: respects InpAS_SampleEveryNTicks and InpAS_SamplesPerBarMax,
+// and rolls bar medians into a fixed-size ring buffer (g_as_bar_medians) to avoid growth.
 void AS_OnTickSample()
 {
-   // Get spread in points using the project helper if present.
-   double spr_pts = 0.0;
-   // Prefer your helper (handles broker quirks)
-   spr_pts = CurrentSpreadPoints();
+   if(!InpAS_Enable || InpAS_Mode==AS_OFF) return;
 
-   // Fallback using Bid/Ask if helper returns non-positive
+   // 1) Detect new bar on the configured SignalTimeframe and finalize the previous bar's median
+   datetime cur_bar_time = iTime(_Symbol, (ENUM_TIMEFRAMES)SignalTimeframe, 0);
+   if(g_as_forming_bar_time != 0 && cur_bar_time != g_as_forming_bar_time)
+   {
+      const int n = ArraySize(g_as_samples);
+      if(n > 0)
+      {
+         // Compute median of samples for the just-closed bar
+         double tmp[]; ArrayResize(tmp, n);
+         for(int i=0;i<n;i++) tmp[i]=g_as_samples[i];
+         ArraySort(tmp);
+         const double med = (n%2!=0 ? tmp[n/2] : 0.5*(tmp[n/2-1] + tmp[n/2]));
+
+         // Push into ring buffer g_as_bar_medians
+         int cap = ArraySize(g_as_bar_medians);
+         if(cap <= 0){ ArrayResize(g_as_bar_medians, 1); cap = 1; }
+         g_as_bar_medians[g_as_hist_pos] = med;
+         g_as_hist_pos = (g_as_hist_pos + 1) % cap;
+         if(g_as_hist_count < cap) g_as_hist_count++;
+      }
+
+      // Reset per-bar state
+      ArrayResize(g_as_samples, 0);
+      g_as_tick_ctr = 0;
+      g_as_exceeded_for_bar = false;
+      g_as_forming_bar_time = cur_bar_time;
+   }
+
+   // 2) Tick-cadence gating
+   g_as_tick_ctr++;
+   if(InpAS_SampleEveryNTicks > 1 && (g_as_tick_ctr % InpAS_SampleEveryNTicks) != 0)
+      return;
+
+   // 3) Per-bar cap on samples
+   if(InpAS_SamplesPerBarMax > 0 && ArraySize(g_as_samples) >= InpAS_SamplesPerBarMax)
+      return;
+
+   // 4) Fetch spread in points (robust on variable-spread brokers)
+   double spr_pts = CurrentSpreadPoints();
    if(spr_pts <= 0.0)
    {
       const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -3450,25 +3489,14 @@ void AS_OnTickSample()
       if(ask > 0.0 && bid > 0.0)
          spr_pts = (ask - bid) / _Point;
    }
-
-   // If still not usable, bail
    if(spr_pts <= 0.0) return;
 
-   // Append to sample buffer
+   // 5) Append to this bar's sample buffer (bounded by step 3)
    int sz = ArraySize(g_as_samples);
    ArrayResize(g_as_samples, sz + 1);
    g_as_samples[sz] = spr_pts;
-
-   // (Optional) keep a sliding window if you maintain a target length elsewhere.
-   // For example, if you have an int InpSpreadMedianWindowTicks:
-   // if(ArraySize(g_as_samples) > InpSpreadMedianWindowTicks)
-   // {
-   //    // shift-left by one; inexpensive at this size/frequency
-   //    for(int i = 1; i < ArraySize(g_as_samples); ++i)
-   //       g_as_samples[i - 1] = g_as_samples[i];
-   //    ArrayResize(g_as_samples, ArraySize(g_as_samples) - 1);
-   // }
 }
+
 
 
 //+------------------------------------------------------------------+
